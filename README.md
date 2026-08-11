@@ -4,7 +4,9 @@ An isometric siege defence game, viewed from a distance. Two rival kingdoms send
 across your ground, and you hold them off by building a brick wall — laid out across a 14×14 plane,
 not just stacked up.
 
-No build step, no dependencies, no install. Open `index.html` in a browser.
+**▶ Play it: <https://jongbeau.github.io/wall-builder/>** — landscape, works on a phone.
+
+No build step, no dependencies, no install. Or open `index.html` in a browser locally.
 
 ```bash
 open index.html
