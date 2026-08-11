@@ -1,0 +1,2393 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#12151f">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="description" content="Wall Builder — hold the line against an endless siege by laying a brick wall.">
+<title>Wall Builder</title>
+
+<style>
+  :root { color-scheme: dark; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    overscroll-behavior: none;          /* kills pull-to-refresh + rubber-banding */
+    background: #0b0d14;
+    /* No text selection, no long-press callout, no tap highlight — this is a game surface. */
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+    font-family: Georgia, "Iowan Old Style", "Times New Roman", serif;
+  }
+
+  body { position: fixed; inset: 0; touch-action: none; }
+
+  #game {
+    display: block;
+    position: absolute;
+    inset: 0;
+    touch-action: none;                 /* no double-tap zoom, no pan gestures */
+  }
+
+  /* Probe element used to read the safe-area insets as real numbers. */
+  #safe {
+    position: fixed;
+    top: 0; left: 0;
+    width: 0; height: 0;
+    pointer-events: none;
+    visibility: hidden;
+    padding:
+      env(safe-area-inset-top, 0px)
+      env(safe-area-inset-right, 0px)
+      env(safe-area-inset-bottom, 0px)
+      env(safe-area-inset-left, 0px);
+  }
+
+  #rotate {
+    position: fixed;
+    inset: 0;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 18px;
+    padding: 24px calc(24px + env(safe-area-inset-right, 0px)) 24px calc(24px + env(safe-area-inset-left, 0px));
+    box-sizing: border-box;
+    text-align: center;
+    background: #12151f;
+    color: #e8dcc0;
+    z-index: 10;
+  }
+  body.portrait #rotate { display: flex; }
+
+  #rotate .glyph {
+    font-size: 54px;
+    line-height: 1;
+    animation: tip 2.6s ease-in-out infinite;
+  }
+  @keyframes tip {
+    0%, 45%, 100% { transform: rotate(0deg); }
+    60%, 85%      { transform: rotate(-90deg); }
+  }
+  #rotate h1 { margin: 0; font-size: 26px; letter-spacing: .04em; color: #d9b464; font-weight: normal; }
+  #rotate p  { margin: 0; max-width: 30ch; font-size: 15px; line-height: 1.5; color: #a9a091; }
+  #rotate .lock {
+    font-size: 13px;
+    color: #7f776b;
+    max-width: 34ch;
+    line-height: 1.5;
+    border-top: 1px solid #262b3a;
+    padding-top: 16px;
+  }
+  @media (prefers-reduced-motion: reduce) { #rotate .glyph { animation: none; } }
+</style>
+
+<canvas id="game"></canvas>
+<div id="safe"></div>
+
+<div id="rotate">
+  <div class="glyph">📱</div>
+  <h1>Turn your device sideways</h1>
+  <p>Wall Builder is played in landscape — the siege needs the width.</p>
+  <p class="lock">Nothing happening? Your screen rotation lock is probably on. Swipe into Control Centre (or Quick Settings) and switch it off.</p>
+</div>
+
+<script>
+"use strict";
+
+/* ==========================================================================
+   CONFIG — every tunable lives here. Balance without touching logic.
+   ========================================================================== */
+
+const CONFIG = {
+  world: { w: 1280, h: 720 },
+
+  // Cell size is derived from the touch target, not from taste: at the smallest
+  // supported landscape phone the world scales by ~0.52, so 84 logical px lands
+  // at ~44 CSS px — the standard minimum finger target. That ceiling is what
+  // fixes the grid at 9x6.
+  grid: { cols: 9, rows: 6, cell: 84, x: 260, groundY: 576 },
+
+  keep: { x: 190, integrity: 100 },
+
+  ui: {
+    hudH: 56,
+    toolbarY: 624, toolbarH: 96,
+    btnW: 104, btnGap: 10,
+    touchLift: 46,        // targets sit above the fingertip so a thumb never hides them
+    maxDpr: 2,            // phones report 3; 2.25x the pixels for no visible gain
+  },
+
+  economy: {
+    startGold: 180,
+    income: 14,           // gold per second from the keep
+    buildCooldown: 0.14,  // stops a single frantic drag becoming a fortress
+    refund: 0.5,
+    repairCost: 6,
+    // Deliberately better value per gold than laying a fresh brick, so patching
+    // under fire is the rewarded play rather than a worse version of rebuilding.
+    repairFrac: 0.40,
+  },
+
+  combat: {
+    // Only so many bodies fit against a wall face. Without this cap the whole
+    // horde focus-fires one brick and any wall evaporates in seconds.
+    frontage: 2,
+    dmgRampPer: 360,      // +100% invader damage every N seconds
+  },
+
+  wall: {
+    cureTime: 2.5,        // fresh brick -> full strength
+    cureStart: 0.25,      // fraction of max HP a brick starts at
+    fallDamage: 0.18,     // fraction of max HP lost per cell fallen
+    gravity: 2400,
+  },
+
+  spawn: {
+    base: 0.30,           // spawns/sec at t=0
+    growth: 0.014,
+    exponent: 0.85,       // sub-linear so it ramps forever without exploding
+    surgeEvery: 78,
+    surgeCount: 6,
+    hpRampPer: 240,       // +100% invader HP every N seconds
+    graceTime: 12,        // opening breathing room before anything spawns
+  },
+
+  fx: { maxParticles: 260, maxParticlesTouch: 150 },
+
+  spawnX: 1360,
+  cycleTime: 150,         // seconds for a full day/night rotation
+};
+
+const BRICKS = {
+  clay:   { name: "Clay",   cost: 8,  hp: 60,  reflect: 0,    tint: "#b0603c" },
+  stone:  { name: "Stone",  cost: 18, hp: 200, reflect: 0,    tint: "#8b8b85" },
+  spike:  { name: "Spike",  cost: 30, hp: 130, reflect: 0.45, tint: "#6d6d77" },
+  // Range must clear the whole grid from any post: the far wall face sits at
+  // x~1016, so anything much under ~500 leaves archers shooting at empty air.
+  archer: { name: "Archer", cost: 55, hp: 70,  reflect: 0,    tint: "#9c8f76",
+            range: 540, atkCd: 0.9, dmg: 22 },
+};
+
+const INVADERS = {
+  grunt:    { hp: 60,  speed: 34, dmg: 15,  atkCd: 0.80, bounty: 5,  keepDmg: 8,  w: 26, h: 46, unlock: 0,   weight: 1.00, body: "#8d5a3b", trim: "#c8a06a" },
+  climber:  { hp: 45,  speed: 52, dmg: 10,  atkCd: 0.90, bounty: 7,  keepDmg: 6,  w: 24, h: 44, unlock: 35,  weight: 0.80, body: "#4f7a52", trim: "#a8d29a", reach: 3 },
+  sapper:   { hp: 40,  speed: 72, dmg: 170, atkCd: 0.60, bounty: 9,  keepDmg: 5,  w: 24, h: 42, unlock: 75,  weight: 0.60, body: "#a8443c", trim: "#ffd08a", fuse: 0.65 },
+  ram:      { hp: 420, speed: 18, dmg: 70,  atkCd: 1.60, bounty: 22, keepDmg: 20, w: 78, h: 52, unlock: 120, weight: 0.45, body: "#6b6259", trim: "#3d3833" },
+  catapult: { hp: 180, speed: 22, dmg: 90,  atkCd: 4.00, bounty: 26, keepDmg: 15, w: 76, h: 58, unlock: 175, weight: 0.35, body: "#7a6a4a", trim: "#4a3f2c", standoff: 1120 },
+  warlord:  { hp: 700, speed: 28, dmg: 45,  atkCd: 1.00, bounty: 60, keepDmg: 25, w: 34, h: 58, unlock: 260, weight: 0.14, body: "#57407a", trim: "#d4b0ff", auraR: 210, auraBuff: 0.28 },
+};
+
+const TOOLS = [
+  { id: "clay",     label: "Clay",   key: "1" },
+  { id: "stone",    label: "Stone",  key: "2" },
+  { id: "spike",    label: "Spike",  key: "3" },
+  { id: "archer",   label: "Archer", key: "4" },
+  { id: "repair",   label: "Repair", key: "5" },
+  { id: "demolish", label: "Raze",   key: "6" },
+];
+
+const SKY = [
+  { t: 0.00, top: "#5ea9e0", bot: "#cfe4f2", sun: "#fff4d6", dark: 0.00 },  // day
+  { t: 0.34, top: "#3b3f78", bot: "#ef9468", sun: "#ffb46a", dark: 0.18 },  // dusk
+  { t: 0.55, top: "#0d1230", bot: "#242c50", sun: "#c9d6ff", dark: 0.52 },  // night
+  { t: 0.82, top: "#494a90", bot: "#f0c188", sun: "#ffe0a8", dark: 0.20 },  // dawn
+  { t: 1.00, top: "#5ea9e0", bot: "#cfe4f2", sun: "#fff4d6", dark: 0.00 },
+];
+
+const W = CONFIG.world.w, H = CONFIG.world.h;
+const COLS = CONFIG.grid.cols, ROWS = CONFIG.grid.rows;
+const CELL = CONFIG.grid.cell, GX = CONFIG.grid.x, GY = CONFIG.grid.groundY;
+const GRID_RIGHT = GX + COLS * CELL;
+
+/* ==========================================================================
+   Small helpers
+   ========================================================================== */
+
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const lerp = (a, b, t) => a + (b - a) * t;
+const rand = (a, b) => a + Math.random() * (b - a);
+const randInt = (a, b) => Math.floor(rand(a, b + 1));
+
+function mulberry32(seed) {
+  return function () {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+function hexToRgb(h) {
+  const n = parseInt(h.slice(1), 16);
+  return [n >> 16 & 255, n >> 8 & 255, n & 255];
+}
+function mixHex(a, b, t) {
+  const A = hexToRgb(a), B = hexToRgb(b);
+  return `rgb(${Math.round(lerp(A[0], B[0], t))},${Math.round(lerp(A[1], B[1], t))},${Math.round(lerp(A[2], B[2], t))})`;
+}
+function shade(hex, amt) {
+  const [r, g, b] = hexToRgb(hex);
+  const f = (v) => clamp(Math.round(amt > 0 ? v + (255 - v) * amt : v * (1 + amt)), 0, 255);
+  return `rgb(${f(r)},${f(g)},${f(b)})`;
+}
+function fmtTime(s) {
+  const m = Math.floor(s / 60), r = Math.floor(s % 60);
+  return `${m}:${r < 10 ? "0" : ""}${r}`;
+}
+
+const idx = (c, r) => r * COLS + c;
+
+/* ==========================================================================
+   Viewport — world<->screen transform, letterboxing, DPR cap, safe areas.
+   Everything about "how big is the screen" lives here and nowhere else.
+   ========================================================================== */
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d", { alpha: false });
+const safeProbe = document.getElementById("safe");
+
+const Viewport = {
+  scale: 1, offX: 0, offY: 0, dpr: 1,
+  vw: 0, vh: 0, portrait: false,
+
+  insets() {
+    const cs = getComputedStyle(safeProbe);
+    return {
+      top: parseFloat(cs.paddingTop) || 0,
+      right: parseFloat(cs.paddingRight) || 0,
+      bottom: parseFloat(cs.paddingBottom) || 0,
+      left: parseFloat(cs.paddingLeft) || 0,
+    };
+  },
+
+  resize() {
+    // visualViewport tracks the iOS address bar sliding in and out; innerWidth does not.
+    const vv = window.visualViewport;
+    const vw = Math.round(vv ? vv.width : window.innerWidth);
+    const vh = Math.round(vv ? vv.height : window.innerHeight);
+    this.vw = vw; this.vh = vh;
+
+    this.portrait = vh > vw;
+    document.body.classList.toggle("portrait", this.portrait);
+
+    const ins = this.insets();
+    // Shrink the usable box by the safe-area insets *before* letterboxing, so the
+    // whole world — toolbar included — always lands inside the safe region.
+    const availW = Math.max(1, vw - ins.left - ins.right);
+    const availH = Math.max(1, vh - ins.top - ins.bottom);
+
+    this.dpr = Math.min(window.devicePixelRatio || 1, CONFIG.ui.maxDpr);
+    this.scale = Math.min(availW / W, availH / H);
+    this.offX = ins.left + (availW - W * this.scale) / 2;
+    this.offY = ins.top + (availH - H * this.scale) / 2;
+
+    canvas.style.width = vw + "px";
+    canvas.style.height = vh + "px";
+    canvas.width = Math.round(vw * this.dpr);
+    canvas.height = Math.round(vh * this.dpr);
+
+    Terrain.build();
+  },
+
+  // Belt-and-braces against the resize/orientationchange events, which mobile
+  // browsers fire late, early, or not at all. Called every frame: two property
+  // reads, and it only does real work when something actually moved. Without it
+  // a missed event leaves toWorld() mapping every touch to the wrong cell.
+  sync() {
+    const vv = window.visualViewport;
+    const vw = Math.round(vv ? vv.width : window.innerWidth);
+    const vh = Math.round(vv ? vv.height : window.innerHeight);
+    const dpr = Math.min(window.devicePixelRatio || 1, CONFIG.ui.maxDpr);
+    if (vw !== this.vw || vh !== this.vh || dpr !== this.dpr) this.resize();
+  },
+
+  toWorld(clientX, clientY) {
+    return {
+      x: (clientX - this.offX) / this.scale,
+      y: (clientY - this.offY) / this.scale,
+    };
+  },
+
+  applyTransform(shakeX = 0, shakeY = 0) {
+    const s = this.scale * this.dpr;
+    ctx.setTransform(s, 0, 0, s,
+      (this.offX + shakeX * this.scale) * this.dpr,
+      (this.offY + shakeY * this.scale) * this.dpr);
+  },
+
+  // CSS px per grid cell — the number that decides whether this is playable on a phone.
+  cellCssSize() { return CELL * this.scale; },
+};
+
+/* ==========================================================================
+   Sprite atlas — bricks are the most-drawn thing on screen, so their detail
+   (bevels, speckle, cracks) is baked once instead of pathed every frame.
+   ========================================================================== */
+
+const BRICK_TYPES = ["clay", "stone", "spike", "archer"];
+const STAGES = 3;      // pristine / cracked / crumbling
+const VARIANTS = 3;    // subtle tone variation so a wall isn't a flat sheet
+
+const Atlas = {
+  canvas: null, unit: 0,
+
+  build(dpr) {
+    const unit = Math.ceil(CELL * dpr);
+    this.unit = unit;
+    const cv = document.createElement("canvas");
+    cv.width = unit * STAGES * VARIANTS;
+    cv.height = unit * BRICK_TYPES.length;
+    const c = cv.getContext("2d");
+    c.scale(dpr, dpr);
+
+    BRICK_TYPES.forEach((type, ti) => {
+      for (let st = 0; st < STAGES; st++) {
+        for (let va = 0; va < VARIANTS; va++) {
+          c.save();
+          c.translate((st * VARIANTS + va) * CELL, ti * CELL);
+          this.paint(c, type, st, va);
+          c.restore();
+        }
+      }
+    });
+    this.canvas = cv;
+  },
+
+  paint(c, type, stage, variant) {
+    const def = BRICKS[type];
+    const rng = mulberry32(type.charCodeAt(0) * 977 + stage * 131 + variant * 37);
+    const S = CELL, pad = 2;
+    const base = shade(def.tint, (variant - 1) * 0.06);
+
+    c.beginPath();
+    c.rect(pad, pad, S - pad * 2, S - pad * 2);
+    c.fillStyle = base;
+    c.fill();
+
+    // Bevel: lit from the upper-left.
+    c.fillStyle = shade(base, 0.22);
+    c.fillRect(pad, pad, S - pad * 2, 5);
+    c.fillRect(pad, pad, 5, S - pad * 2);
+    c.fillStyle = shade(base, -0.28);
+    c.fillRect(pad, S - pad - 6, S - pad * 2, 6);
+    c.fillRect(S - pad - 6, pad, 6, S - pad * 2);
+
+    // Aggregate speckle.
+    for (let i = 0; i < 26; i++) {
+      const r = rng() * 2.6 + 0.7;
+      c.fillStyle = `rgba(0,0,0,${0.05 + rng() * 0.09})`;
+      c.beginPath();
+      c.arc(pad + rng() * (S - pad * 2), pad + rng() * (S - pad * 2), r, 0, 6.284);
+      c.fill();
+    }
+    for (let i = 0; i < 12; i++) {
+      c.fillStyle = `rgba(255,255,255,${0.04 + rng() * 0.07})`;
+      c.beginPath();
+      c.arc(pad + rng() * (S - pad * 2), pad + rng() * (S - pad * 2), rng() * 2 + 0.6, 0, 6.284);
+      c.fill();
+    }
+
+    // Mortar joint around the edge.
+    c.strokeStyle = "rgba(20,16,12,0.55)";
+    c.lineWidth = 3;
+    c.strokeRect(pad + 1.5, pad + 1.5, S - pad * 2 - 3, S - pad * 2 - 3);
+
+    if (type === "spike") this.paintSpikes(c, S, base);
+    if (type === "archer") this.paintArcher(c, S, base, rng);
+
+    // Damage cracks.
+    if (stage > 0) {
+      const n = stage === 1 ? 2 : 4;
+      for (let i = 0; i < n; i++) {
+        c.strokeStyle = `rgba(18,12,8,${stage === 1 ? 0.5 : 0.75})`;
+        c.lineWidth = stage === 1 ? 2 : 3;
+        c.beginPath();
+        let x = rng() * S, y = rng() * S;
+        c.moveTo(x, y);
+        for (let k = 0; k < 4; k++) {
+          x += rng() * 26 - 13; y += rng() * 26 - 13;
+          c.lineTo(clamp(x, 2, S - 2), clamp(y, 2, S - 2));
+        }
+        c.stroke();
+      }
+    }
+    if (stage === 2) {
+      // Chunks missing from the edges.
+      c.fillStyle = "rgba(0,0,0,0.30)";
+      for (let i = 0; i < 3; i++) {
+        c.beginPath();
+        c.arc(rng() * S, rng() * S, rng() * 8 + 5, 0, 6.284);
+        c.fill();
+      }
+    }
+  },
+
+  paintSpikes(c, S, base) {
+    // Everything stays inside the cell: the atlas clips at the sprite edge, and
+    // blades drawn past it simply vanish.
+    c.fillStyle = "#c9cdd6";
+    c.strokeStyle = "rgba(20,20,26,0.65)";
+    c.lineWidth = 1.5;
+    for (let i = 0; i < 3; i++) {
+      const y = 21 + i * 22;
+      c.beginPath();
+      c.moveTo(S - 24, y - 9);
+      c.lineTo(S - 4, y);
+      c.lineTo(S - 24, y + 9);
+      c.closePath();
+      c.fill(); c.stroke();
+      c.fillStyle = "rgba(255,255,255,0.5)";
+      c.beginPath();
+      c.moveTo(S - 24, y - 9); c.lineTo(S - 4, y); c.lineTo(S - 20, y - 3);
+      c.closePath(); c.fill();
+      c.fillStyle = "#c9cdd6";
+    }
+    // Iron band the blades are set into.
+    c.fillStyle = "rgba(210,216,226,0.55)";
+    c.fillRect(S - 28, 8, 5, S - 16);
+  },
+
+  paintArcher(c, S, base, rng) {
+    // Crenellated top with an arrow slit — reads as a post even at 44px.
+    c.fillStyle = shade(base, -0.35);
+    for (let i = 0; i < 3; i++) c.fillRect(8 + i * 24, 2, 14, 16);
+    c.fillStyle = shade(base, 0.10);
+    c.fillRect(10, 18, S - 20, 6);
+
+    c.fillStyle = "rgba(15,12,10,0.85)";
+    c.fillRect(S / 2 - 5, 32, 10, 30);
+    c.fillRect(S / 2 - 14, 38, 28, 8);
+
+    c.strokeStyle = "rgba(0,0,0,0.25)";
+    c.lineWidth = 2;
+    c.beginPath();
+    c.moveTo(6, S - 22); c.lineTo(S - 6, S - 22);
+    c.stroke();
+  },
+
+  draw(c, type, stage, variant, x, y, size) {
+    const ti = BRICK_TYPES.indexOf(type);
+    const u = this.unit;
+    c.drawImage(this.canvas,
+      (stage * VARIANTS + variant) * u, ti * u, u, u,
+      x, y, size, size);
+  },
+};
+
+/* ==========================================================================
+   Terrain — hills, rival kingdom, keep and ground pre-rendered once per resize.
+   The sky is drawn live because it cycles; the landscape underneath never changes.
+   ========================================================================== */
+
+const Terrain = {
+  canvas: null,
+
+  build() {
+    const dpr = Viewport.dpr;
+    Atlas.build(dpr);
+
+    const cv = document.createElement("canvas");
+    cv.width = Math.ceil(W * dpr);
+    cv.height = Math.ceil(H * dpr);
+    const c = cv.getContext("2d");
+    c.scale(dpr, dpr);
+    const rng = mulberry32(20260810);
+
+    // Far hills.
+    this.hills(c, rng, GY - 96, 200, "#4a5568", 0.55);
+    this.hills(c, rng, GY - 58, 150, "#3d4a5c", 0.75);
+
+    // The rival kingdom, brooding on the horizon.
+    this.rivalKingdom(c, 1120, GY - 58);
+
+    // Ground.
+    const g = c.createLinearGradient(0, GY, 0, H);
+    g.addColorStop(0, "#5a6b3f");
+    g.addColorStop(0.16, "#4a5533");
+    g.addColorStop(1, "#2e3423");
+    c.fillStyle = g;
+    c.fillRect(0, GY, W, H - GY);
+    c.fillStyle = "#6b7d4a";
+    c.fillRect(0, GY, W, 5);
+
+    // Tufts of grass.
+    c.strokeStyle = "rgba(120,145,80,0.55)";
+    c.lineWidth = 2;
+    for (let i = 0; i < 150; i++) {
+      const x = rng() * W, y = GY + 6 + rng() * 40;
+      c.beginPath();
+      c.moveTo(x, y);
+      c.lineTo(x + rng() * 6 - 3, y - 5 - rng() * 6);
+      c.stroke();
+    }
+
+    this.keep(c, rng);
+    this.canvas = cv;
+  },
+
+  hills(c, rng, baseY, amp, color, alpha) {
+    c.save();
+    c.globalAlpha = alpha;
+    c.fillStyle = color;
+    c.beginPath();
+    c.moveTo(0, H);
+    c.lineTo(0, baseY);
+    for (let x = 0; x <= W; x += 40) {
+      const y = baseY - Math.sin(x * 0.0042 + rng() * 0.06) * amp * 0.4
+                      - Math.sin(x * 0.0011) * amp * 0.5;
+      c.lineTo(x, y);
+    }
+    c.lineTo(W, H);
+    c.closePath();
+    c.fill();
+    c.restore();
+  },
+
+  rivalKingdom(c, x, baseY) {
+    c.save();
+    c.globalAlpha = 0.85;
+    c.fillStyle = "#2b3040";
+    const towers = [[0, 150, 46], [52, 200, 40], [104, 122, 44], [150, 176, 52]];
+    for (const [dx, h, w] of towers) {
+      c.fillRect(x + dx, baseY - h, w, h);
+      for (let i = 0; i < Math.floor(w / 14); i++) {
+        c.fillRect(x + dx + i * 14, baseY - h - 10, 9, 10);
+      }
+    }
+    c.fillStyle = "rgba(255,120,60,0.5)";
+    for (let i = 0; i < 7; i++) {
+      c.fillRect(x + rand(4, 190), baseY - rand(20, 170), 5, 8);
+    }
+    // Banners.
+    c.fillStyle = "#7a2230";
+    c.fillRect(x + 66, baseY - 236, 3, 40);
+    c.beginPath();
+    c.moveTo(x + 69, baseY - 236);
+    c.lineTo(x + 100, baseY - 228);
+    c.lineTo(x + 69, baseY - 214);
+    c.closePath();
+    c.fill();
+    c.restore();
+  },
+
+  keep(c, rng) {
+    const bx = 0, by = GY, kw = CONFIG.keep.x;
+
+    // Main block.
+    c.fillStyle = "#6d6a63";
+    c.fillRect(bx, by - 210, kw, 210);
+    c.fillStyle = "#7a776f";
+    c.fillRect(bx, by - 210, kw - 14, 210);
+
+    // Stone courses.
+    c.strokeStyle = "rgba(40,36,32,0.35)";
+    c.lineWidth = 2;
+    for (let y = by - 196; y < by; y += 26) {
+      c.beginPath(); c.moveTo(bx, y); c.lineTo(bx + kw, y); c.stroke();
+      for (let x = bx + ((y / 26) % 2 ? 30 : 0); x < bx + kw; x += 60) {
+        c.beginPath(); c.moveTo(x, y); c.lineTo(x, y + 26); c.stroke();
+      }
+    }
+
+    // Tower + crenellations.
+    c.fillStyle = "#84817a";
+    c.fillRect(bx + 96, by - 290, 86, 96);
+    for (let i = 0; i < 5; i++) c.fillRect(bx + 96 + i * 18, by - 302, 12, 14);
+    for (let i = 0; i < 10; i++) c.fillRect(bx + i * 20, by - 222, 13, 16);
+
+    // Gate.
+    c.fillStyle = "#3b3128";
+    c.beginPath();
+    c.moveTo(bx + 30, by);
+    c.lineTo(bx + 30, by - 62);
+    c.quadraticCurveTo(bx + 58, by - 94, bx + 86, by - 62);
+    c.lineTo(bx + 86, by);
+    c.closePath();
+    c.fill();
+    c.strokeStyle = "#5c4d3c";
+    c.lineWidth = 3;
+    for (let i = 1; i < 4; i++) {
+      c.beginPath(); c.moveTo(bx + 30 + i * 14, by); c.lineTo(bx + 30 + i * 14, by - 70); c.stroke();
+    }
+
+    // Our colours, flying from the tower.
+    const poleX = bx + 137, poleTop = by - 396, poleBot = by - 290;
+    c.fillStyle = "#8f7d52";
+    c.fillRect(poleX, poleTop, 4, poleBot - poleTop);
+    c.fillStyle = "#d8bd77";
+    c.fillRect(poleX, poleTop, 2, poleBot - poleTop);
+    c.fillStyle = "#e8cf85";                       // finial
+    c.beginPath(); c.arc(poleX + 2, poleTop - 2, 5, 0, 6.284); c.fill();
+
+    this.starsAndStripes(c, poleX + 4, poleTop + 8, 78, 41);
+  },
+
+  // The Stars and Stripes: thirteen stripes starting and ending red, the union
+  // over the top seven, and fifty stars in the 9-row 6/5 alternating pattern.
+  // Every band follows one shared slack curve that grows toward the fly end, so
+  // the whole thing hangs like cloth instead of sitting on the sky like a decal.
+  starsAndStripes(c, x, y, w, h) {
+    const STRIPES = 13;
+    const sh = h / STRIPES;
+    const sag = (t) => Math.sin(t * 6.6) * h * 0.075 * t + t * h * 0.10;
+
+    // Trace a horizontal band between two heights, riding the sag curve.
+    const band = (top, bottom, tMax = 1) => {
+      const N = 20;
+      c.beginPath();
+      for (let i = 0; i <= N; i++) {
+        const t = (i / N) * tMax;
+        const px = x + w * t, py = y + top + sag(t);
+        if (i === 0) c.moveTo(px, py); else c.lineTo(px, py);
+      }
+      for (let i = N; i >= 0; i--) {
+        const t = (i / N) * tMax;
+        c.lineTo(x + w * t, y + bottom + sag(t));
+      }
+      c.closePath();
+    };
+
+    for (let i = 0; i < STRIPES; i++) {
+      band(i * sh, (i + 1) * sh);
+      c.fillStyle = i % 2 === 0 ? "#b22234" : "#ffffff";
+      c.fill();
+    }
+
+    // Union: seven stripes deep, two fifths of the hoist.
+    const uw = w * 0.40, uh = sh * 7;
+    band(0, uh, 0.40);
+    c.fillStyle = "#3c3b6e";
+    c.fill();
+
+    // Stars sit on a 12-column, 10-row lattice: odd rows take the odd columns
+    // (six stars), even rows the even ones (five).
+    c.fillStyle = "#ffffff";
+    const r = Math.max(0.7, h * 0.021);
+    for (let row = 0; row < 9; row++) {
+      const six = row % 2 === 0;
+      const n = six ? 6 : 5;
+      const sy = uh * (row + 1) / 10;
+      for (let s = 0; s < n; s++) {
+        const ux = uw * (six ? 2 * s + 1 : 2 * s + 2) / 12;
+        c.beginPath();
+        c.arc(x + ux, y + sy + sag(ux / w), r, 0, 6.284);
+        c.fill();
+      }
+    }
+
+    // Shade the troughs of the curve and outline the whole flag, so it still
+    // reads against a pale midday sky.
+    band(0, h);
+    c.save();
+    c.clip();
+    const g = c.createLinearGradient(x, 0, x + w, 0);
+    g.addColorStop(0, "rgba(0,0,0,0.22)");
+    g.addColorStop(0.22, "rgba(0,0,0,0)");
+    g.addColorStop(0.62, "rgba(0,0,0,0.14)");
+    g.addColorStop(1, "rgba(0,0,0,0)");
+    c.fillStyle = g;
+    c.fillRect(x, y - h, w, h * 3);
+    c.restore();
+    band(0, h);
+    c.strokeStyle = "rgba(30,24,20,0.45)";
+    c.lineWidth = 1.2;
+    c.stroke();
+  },
+};
+
+/* ==========================================================================
+   Game state
+   ========================================================================== */
+
+const Game = {
+  state: "menu",          // menu | playing | paused | over
+  t: 0,                   // seconds survived
+  gold: 0,
+  integrity: 0,
+  stopped: 0,             // invaders killed
+  breaches: 0,
+  best: 0,
+  tool: "clay",
+  buildCd: 0,
+  shake: 0,
+  banner: null,           // {text, life}
+  nextSurge: 0,
+  spawnAcc: 0,
+  flash: 0,               // keep-damage flash
+};
+
+let grid = new Array(COLS * ROWS).fill(null);
+let invaders = [];
+let projectiles = [];
+let particles = [];
+
+const Pointer = { x: -999, y: -999, down: false, active: false, coarse: false, id: null };
+
+function maxParticles() {
+  return Pointer.coarse ? CONFIG.fx.maxParticlesTouch : CONFIG.fx.maxParticles;
+}
+
+function loadBest() {
+  try { return parseFloat(localStorage.getItem("wallbuilder.best") || "0") || 0; }
+  catch (e) { return 0; }
+}
+function saveBest(v) {
+  try { localStorage.setItem("wallbuilder.best", String(v)); } catch (e) { /* private mode */ }
+}
+
+function resetGame() {
+  grid = new Array(COLS * ROWS).fill(null);
+  invaders.length = 0;
+  projectiles.length = 0;
+  particles.length = 0;
+  Game.t = 0;
+  Game.gold = CONFIG.economy.startGold;
+  Game.integrity = CONFIG.keep.integrity;
+  Game.stopped = 0;
+  Game.breaches = 0;
+  Game.tool = "clay";
+  Game.buildCd = 0;
+  Game.shake = 0;
+  Game.banner = null;
+  Game.nextSurge = CONFIG.spawn.surgeEvery;
+  Game.spawnAcc = 0;
+  Game.flash = 0;
+}
+
+function score() {
+  return Math.floor(Game.t * 10 + Game.stopped * 5);
+}
+
+/* ==========================================================================
+   Grid
+   ========================================================================== */
+
+function cellAt(wx, wy) {
+  const c = Math.floor((wx - GX) / CELL);
+  const r = Math.floor((GY - wy) / CELL);
+  if (c < 0 || c >= COLS || r < 0 || r >= ROWS) return null;
+  return { c, r };
+}
+const cellX = (c) => GX + c * CELL;
+const cellY = (r) => GY - (r + 1) * CELL;
+
+// Because settle() compacts every column, a column is always a contiguous stack
+// from the ground up — so its height is simply how many bricks it holds, and
+// there are never floating bricks or interior holes to reason about.
+function columnHeight(c) {
+  if (c < 0 || c >= COLS) return 0;
+  let n = 0;
+  for (let r = 0; r < ROWS; r++) if (grid[idx(c, r)]) n++; else break;
+  return n;
+}
+
+function colAtX(x) {
+  const c = Math.floor((x - GX) / CELL);
+  return (c < 0 || c >= COLS) ? -1 : c;
+}
+
+function makeBrick(type) {
+  const def = BRICKS[type];
+  return {
+    type,
+    maxHp: def.hp,
+    hp: def.hp * CONFIG.wall.cureStart,
+    cure: 0,                       // 0..1
+    variant: randInt(0, VARIANTS - 1),
+    fallOffset: 0,
+    fallVel: 0,
+    hitFlash: 0,
+    cd: type === "archer" ? Math.random() * BRICKS.archer.atkCd : 0,
+  };
+}
+
+function canPlace(type, c, r) {
+  if (c < 0 || c >= COLS || r < 0 || r >= ROWS) return false;
+  if (grid[idx(c, r)]) return false;
+  const below = r === 0 ? "ground" : grid[idx(c, r - 1)];
+  if (!below) return false;                                   // support rule
+  if (below !== "ground" && below.type === "archer") return false;  // posts need open sky
+  if (type === "archer" && r === 0) return false;             // must sit on a brick
+  return true;
+}
+
+function placeBrick(type, c, r) {
+  const def = BRICKS[type];
+  if (Game.gold < def.cost) { denied(cellX(c) + CELL / 2, cellY(r) + CELL / 2, "No gold"); return false; }
+  if (!canPlace(type, c, r)) return false;
+  grid[idx(c, r)] = makeBrick(type);
+  Game.gold -= def.cost;
+  puff(cellX(c) + CELL / 2, cellY(r) + CELL / 2, 6, "#d9cdb4");
+  return true;
+}
+
+function damageCell(c, r, amount, attacker) {
+  const cell = grid[idx(c, r)];
+  if (!cell) return false;
+  cell.hp -= amount;
+  cell.hitFlash = 1;
+
+  const def = BRICKS[cell.type];
+  if (def.reflect && attacker) hurtInvader(attacker, amount * def.reflect);
+
+  if (cell.hp <= 0) {
+    burstBrick(c, r, cell);
+    grid[idx(c, r)] = null;
+    settle();
+    return true;
+  }
+  return false;
+}
+
+function repairCell(c, r) {
+  const cell = grid[idx(c, r)];
+  if (!cell) return false;
+  if (cell.hp >= cell.maxHp) return false;
+  if (Game.gold < CONFIG.economy.repairCost) {
+    denied(cellX(c) + CELL / 2, cellY(r) + CELL / 2, "No gold");
+    return false;
+  }
+  Game.gold -= CONFIG.economy.repairCost;
+  cell.hp = Math.min(cell.maxHp, cell.hp + cell.maxHp * CONFIG.economy.repairFrac);
+  puff(cellX(c) + CELL / 2, cellY(r) + CELL / 2, 5, "#9fd8a0");
+  return true;
+}
+
+function demolishCell(c, r) {
+  const cell = grid[idx(c, r)];
+  if (!cell) return false;
+  Game.gold += Math.floor(BRICKS[cell.type].cost * CONFIG.economy.refund);
+  burstBrick(c, r, cell);
+  grid[idx(c, r)] = null;
+  settle();
+  return true;
+}
+
+// Compact each column downward. Anything that was resting on a destroyed brick
+// falls, takes fall damage, and can itself shatter — which is why undermining
+// the base of a tall wall cascades.
+function settle() {
+  for (let c = 0; c < COLS; c++) {
+    let write = 0;
+    for (let r = 0; r < ROWS; r++) {
+      const i = idx(c, r);
+      const cell = grid[i];
+      if (!cell) continue;
+      // Defensive: whatever route took a brick to zero, it does not stay standing.
+      if (cell.hp <= 0) { grid[i] = null; burstBrick(c, r, cell); continue; }
+      if (write !== r) {
+        const drop = r - write;
+        grid[i] = null;
+        cell.hp -= cell.maxHp * CONFIG.wall.fallDamage * drop;
+        cell.fallOffset += drop * CELL;
+        cell.fallVel = 0;
+        if (cell.hp <= 0) { burstBrick(c, write, cell); continue; }  // shatters mid-fall
+        grid[idx(c, write)] = cell;
+      }
+      write++;
+    }
+  }
+}
+
+function wallTopY(c) { return GY - columnHeight(c) * CELL; }
+
+/* ==========================================================================
+   Particles
+   ========================================================================== */
+
+function addParticle(p) {
+  if (particles.length >= maxParticles()) particles.shift();
+  particles.push(p);
+}
+
+function puff(x, y, n, color) {
+  for (let i = 0; i < n; i++) {
+    addParticle({ kind: "dust", x, y, vx: rand(-40, 40), vy: rand(-70, -10),
+      life: 0, max: rand(0.35, 0.75), r: rand(3, 8), color });
+  }
+}
+
+function burstBrick(c, r, cell) {
+  const x = cellX(c) + CELL / 2, y = cellY(r) + CELL / 2;
+  const tint = BRICKS[cell.type].tint;
+  for (let i = 0; i < 12; i++) {
+    addParticle({ kind: "debris", x, y, vx: rand(-190, 190), vy: rand(-260, -40),
+      life: 0, max: rand(0.5, 1.0), r: rand(5, 13), color: tint, spin: rand(-9, 9), rot: rand(0, 6.28) });
+  }
+  puff(x, y, 7, "#c9bda4");
+  Game.shake = Math.min(11, Game.shake + 4.5);
+}
+
+function damageText(x, y, text, color) {
+  // Jittered so simultaneous hits on one target don't stack into an unreadable blob.
+  addParticle({ kind: "text", x: x + rand(-10, 10), y: y + rand(-12, 12),
+    vx: rand(-14, 14), vy: rand(-64, -42), life: 0, max: 0.85, text, color });
+}
+function denied(x, y, text) { damageText(x, y, text, "#e07a6a"); }
+
+function updateParticles(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.life += dt;
+    if (p.life >= p.max) { particles.splice(i, 1); continue; }
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    if (p.kind === "debris") { p.vy += 900 * dt; p.rot += p.spin * dt; }
+    else if (p.kind === "dust") { p.vy += 90 * dt; p.vx *= 0.96; }
+  }
+}
+
+/* ==========================================================================
+   Invaders
+   ========================================================================== */
+
+function spawnInvader(type) {
+  const d = INVADERS[type];
+  const hpMul = 1 + Game.t / CONFIG.spawn.hpRampPer;
+  const inv = {
+    type, def: d,
+    x: CONFIG.spawnX + rand(0, 90),
+    y: GY,
+    px: 0, py: 0,
+    vy: 0,
+    hp: d.hp * hpMul,
+    maxHp: d.hp * hpMul,
+    state: "advance",
+    cd: 0,
+    fuse: 0,
+    phase: rand(0, 6.28),
+    buff: 0,
+    climbT: 0,
+    targetCol: -1,
+    hitFlash: 0,
+  };
+  inv.px = inv.x; inv.py = inv.y;
+  invaders.push(inv);
+}
+
+function hurtInvader(inv, amount) {
+  inv.hp -= amount;
+  inv.hitFlash = 1;
+  if (inv.hp <= 0 && !inv.dead) {
+    inv.dead = true;
+    Game.gold += inv.def.bounty;
+    Game.stopped++;
+    damageText(inv.x, inv.y - inv.def.h - 10, "+" + inv.def.bounty, "#f2cf6b");
+    for (let i = 0; i < 7; i++) {
+      addParticle({ kind: "debris", x: inv.x, y: inv.y - inv.def.h / 2,
+        vx: rand(-150, 150), vy: rand(-200, -30), life: 0, max: rand(0.4, 0.8),
+        r: rand(3, 7), color: inv.def.body, spin: rand(-8, 8), rot: 0 });
+    }
+  }
+}
+
+function speedOf(inv) { return inv.def.speed * (1 + inv.buff); }
+function damageOf(inv) {
+  return inv.def.dmg * (1 + inv.buff) * (1 + Game.t / CONFIG.combat.dmgRampPer);
+}
+
+// A sapper is a delivery, not a siege line, so it never waits its turn.
+// Everything else costs exactly one slot: giving the ram two meant a single
+// grunt holding the other slot could starve it out of the fight forever.
+function slotCost(inv) { return inv.type === "sapper" ? 0 : 1; }
+
+// Live tally of who is pressed against which column, rebuilt once per step.
+let frontage = new Map();
+
+function slotsUsed(c) { return frontage.get(c) || 0; }
+function claimSlot(inv, c) {
+  const used = slotsUsed(c);
+  frontage.set(c, used + slotCost(inv));
+  return used;
+}
+function hasRoom(inv, c) { return slotsUsed(c) + slotCost(inv) <= CONFIG.combat.frontage; }
+
+// Stand flush against the face, stepped back by however many are already there
+// so a second attacker doesn't render inside the first.
+function takeUpPosition(inv, c) {
+  inv.slotIdx = claimSlot(inv, c);
+  inv.x = cellX(c) + CELL + inv.def.w / 2 + inv.slotIdx * inv.def.w * 0.8;
+}
+
+function reachKeep(inv) {
+  Game.integrity -= inv.def.keepDmg;
+  Game.breaches++;
+  Game.flash = 1;
+  Game.shake = Math.min(16, Game.shake + 7);
+  damageText(CONFIG.keep.x + 30, GY - 130, "-" + inv.def.keepDmg, "#ff8a7a");
+  inv.dead = true;
+  if (Game.integrity <= 0) {
+    Game.integrity = 0;
+    endRun();
+  }
+}
+
+function sapperExplode(inv, c) {
+  Game.shake = Math.min(18, Game.shake + 9);
+  for (let dc = 0; dc >= -1; dc--) {
+    for (let r = 0; r < 2; r++) {
+      const cc = c + dc;
+      if (cc < 0 || cc >= COLS) continue;
+      if (grid[idx(cc, r)]) damageCell(cc, r, inv.def.dmg, null);
+    }
+  }
+  const bx = cellX(c) + CELL / 2, by = GY - CELL / 2;
+  for (let i = 0; i < 18; i++) {
+    addParticle({ kind: "debris", x: bx, y: by, vx: rand(-320, 320), vy: rand(-340, -60),
+      life: 0, max: rand(0.4, 0.9), r: rand(4, 12), color: "#e8944a", spin: rand(-10, 10), rot: 0 });
+  }
+  puff(bx, by, 12, "#ffcf8a");
+  inv.dead = true;
+}
+
+function updateInvaders(dt) {
+  // Warlord aura, recomputed each step.
+  const lords = invaders.filter(i => i.type === "warlord" && !i.dead);
+  for (const inv of invaders) {
+    inv.buff = 0;
+    if (lords.length && inv.type !== "warlord") {
+      for (const l of lords) {
+        if (Math.abs(l.x - inv.x) < l.def.auraR) { inv.buff = l.def.auraBuff; break; }
+      }
+    }
+  }
+
+  // Rebuild the frontage tally, then lay out anyone queued behind it. Doing both
+  // once per step keeps this O(n log n) rather than O(n^2).
+  frontage = new Map();
+  const queues = new Map();
+  for (const inv of invaders) {
+    if (inv.dead) continue;
+    if (inv.state === "attack" || inv.state === "fuse") claimSlot(inv, inv.targetCol);
+    else if (inv.state === "wait") {
+      if (!queues.has(inv.targetCol)) queues.set(inv.targetCol, []);
+      queues.get(inv.targetCol).push(inv);
+    }
+  }
+  for (const [c, list] of queues) {
+    list.sort((a, b) => a.x - b.x);
+    const faceX = cellX(c) + CELL;
+    let x = faceX + CELL * 0.5;
+    for (const inv of list) {
+      x += inv.def.w * 0.95 + 6;
+      inv.queueX = x;
+    }
+  }
+
+  for (const inv of invaders) {
+    if (inv.dead) continue;
+    // The keep can fall partway through this loop; without this the rest of the
+    // horde still "arrives" and inflates the breach count past what killed us.
+    if (Game.state !== "playing") break;
+    inv.px = inv.x; inv.py = inv.y;
+    inv.cd -= dt;
+    inv.phase += dt * (2 + speedOf(inv) * 0.06);
+    if (inv.hitFlash > 0) inv.hitFlash = Math.max(0, inv.hitFlash - dt * 5);
+
+    switch (inv.state) {
+      case "advance":     stepAdvance(inv, dt); break;
+      case "wait":        stepWait(inv, dt); break;
+      case "attack":      stepAttack(inv, dt); break;
+      case "fuse":        stepFuse(inv, dt); break;
+      case "climb":       stepClimb(inv, dt); break;
+      case "ontop":       stepOnTop(inv, dt); break;
+      case "ranged":      stepRanged(inv, dt); break;
+      case "fall":        stepFall(inv, dt); break;
+    }
+  }
+
+  for (let i = invaders.length - 1; i >= 0; i--) if (invaders[i].dead) invaders.splice(i, 1);
+}
+
+function stepAdvance(inv, dt) {
+  // Catapults never close; they stand off and lob.
+  if (inv.type === "catapult" && inv.x <= inv.def.standoff) {
+    inv.state = "ranged"; inv.cd = 1.2; return;
+  }
+
+  inv.x -= speedOf(inv) * dt;
+
+  if (inv.x <= CONFIG.keep.x + 20) { reachKeep(inv); return; }
+
+  const lead = inv.x - inv.def.w / 2;
+  const c = colAtX(lead);
+  if (c >= 0 && columnHeight(c) > 0) {
+    inv.targetCol = c;
+
+    // Climbers go over rather than through, so the queue never applies to them.
+    if (inv.type === "climber" && columnHeight(c) <= inv.def.reach) {
+      inv.x = cellX(c) + CELL + inv.def.w / 2;
+      inv.state = "climb"; inv.climbT = 0;
+      return;
+    }
+    if (inv.type === "sapper") {
+      inv.x = cellX(c) + CELL + inv.def.w / 2;
+      inv.state = "fuse"; inv.fuse = inv.def.fuse;
+      return;
+    }
+    if (!hasRoom(inv, c)) { inv.state = "wait"; return; }
+
+    takeUpPosition(inv, c);
+    inv.state = "attack";
+    inv.cd = Math.min(inv.cd, 0.25);
+  }
+}
+
+// Held back by the bodies already at the wall. Shuffle up to the assigned spot
+// in the queue and take the first slot that opens.
+function stepWait(inv, dt) {
+  const c = inv.targetCol;
+  if (c < 0 || columnHeight(c) === 0) { inv.state = "advance"; return; }
+
+  if (inv.type === "climber" && columnHeight(c) <= inv.def.reach) {
+    inv.x = cellX(c) + CELL + inv.def.w / 2;
+    inv.state = "climb"; inv.climbT = 0;
+    return;
+  }
+  if (hasRoom(inv, c)) {
+    takeUpPosition(inv, c);
+    inv.state = "attack";
+    inv.cd = 0.25;
+    return;
+  }
+  // Close on the assigned spot from either side — an invader that was already
+  // flush against the wall when the line filled up has to give ground and jostle
+  // back into the queue, rather than standing inside whoever is swinging.
+  const target = inv.queueX != null ? inv.queueX : inv.x;
+  const d = target - inv.x;
+  const step = speedOf(inv) * (d > 0 ? 0.6 : 1) * dt;
+  inv.x = Math.abs(d) <= step ? target : inv.x + Math.sign(d) * step;
+}
+
+function stepAttack(inv, dt) {
+  const c = inv.targetCol;
+  const h = columnHeight(c);
+  if (c < 0 || h === 0) { inv.state = "advance"; return; }
+
+  // Climbers re-evaluate: if the wall has been worn down to their reach, over they go.
+  if (inv.type === "climber" && h <= inv.def.reach) { inv.state = "climb"; inv.climbT = 0; return; }
+
+  if (inv.cd <= 0) {
+    inv.cd = inv.def.atkCd;
+    // Rams and grunts batter the base; that is what makes undermining possible.
+    damageCell(c, 0, damageOf(inv), inv);
+    const hitX = cellX(c) + CELL, hitY = GY - CELL / 2;
+    puff(hitX, hitY, 3, "#cdbfa4");
+    if (inv.type === "ram") Game.shake = Math.min(14, Game.shake + 5);
+  }
+}
+
+function stepFuse(inv, dt) {
+  inv.fuse -= dt;
+  if (inv.fuse <= 0) sapperExplode(inv, inv.targetCol);
+}
+
+function stepClimb(inv, dt) {
+  const c = inv.targetCol;
+  const h = columnHeight(c);
+  if (h === 0) { inv.state = "advance"; inv.y = GY; return; }
+  const topY = GY - h * CELL;
+  inv.climbT += dt * 0.85;
+  inv.y = lerp(GY, topY, clamp(inv.climbT, 0, 1));
+  if (inv.climbT >= 1) { inv.y = topY; inv.state = "ontop"; }
+}
+
+function stepOnTop(inv, dt) {
+  inv.x -= speedOf(inv) * 0.8 * dt;
+
+  if (inv.x < GX) { inv.state = "fall"; inv.vy = 0; return; }
+
+  const c = colAtX(inv.x);
+  if (c < 0) { inv.state = "fall"; inv.vy = 0; return; }
+  const h = columnHeight(c);
+  if (h === 0) { inv.state = "fall"; inv.vy = 0; return; }
+
+  const surface = GY - h * CELL;
+  // Step down freely; a step up of more than one course has to be fought through.
+  const next = colAtX(inv.x - CELL * 0.6);
+  if (next >= 0 && columnHeight(next) > h + 1) {
+    inv.targetCol = next;
+    inv.state = "attack";
+    return;
+  }
+  inv.y = surface;
+}
+
+function stepFall(inv, dt) {
+  inv.vy += 1800 * dt;
+  inv.y += inv.vy * dt;
+  inv.x -= speedOf(inv) * 0.35 * dt;
+  if (inv.y >= GY) {
+    inv.y = GY;
+    inv.vy = 0;
+    inv.state = "advance";
+    puff(inv.x, GY, 4, "#c9bda4");
+  }
+}
+
+function stepRanged(inv, dt) {
+  if (inv.cd <= 0) {
+    inv.cd = inv.def.atkCd;
+    lobRock(inv);
+  }
+}
+
+/* ==========================================================================
+   Projectiles
+   ========================================================================== */
+
+function fireArrow(c, r) {
+  const ox = cellX(c) + CELL / 2, oy = cellY(r) + CELL * 0.35;
+  const def = BRICKS.archer;
+  let best = null, bestD = Infinity;
+  for (const inv of invaders) {
+    if (inv.dead) continue;
+    if (inv.x < ox) continue;                       // posts shoot outward
+    const d = Math.hypot(inv.x - ox, (inv.y - inv.def.h / 2) - oy);
+    if (d < def.range && d < bestD) { bestD = d; best = inv; }
+  }
+  if (!best) return false;
+
+  const tx = best.x, ty = best.y - best.def.h * 0.55;
+  const ang = Math.atan2(ty - oy, tx - ox);
+  const sp = 620;
+  projectiles.push({ kind: "arrow", x: ox, y: oy, px: ox, py: oy,
+    vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp, life: 0, max: 1.6, dmg: def.dmg });
+  return true;
+}
+
+function lobRock(inv) {
+  // Aim for the tallest standing column — catapults punish exactly what climbers can't beat.
+  let bestC = -1, bestH = 0;
+  for (let c = 0; c < COLS; c++) {
+    const h = columnHeight(c);
+    if (h > bestH) { bestH = h; bestC = c; }
+  }
+  let tx, ty;
+  if (bestC >= 0) { tx = cellX(bestC) + CELL / 2; ty = GY - bestH * CELL + CELL / 2; }
+  else { tx = CONFIG.keep.x + 60; ty = GY - 40; }
+  tx += rand(-CELL * 0.4, CELL * 0.4);
+
+  const ox = inv.x - 20, oy = inv.y - inv.def.h - 6;
+  const T = 1.6, g = 900;
+  projectiles.push({
+    kind: "rock", x: ox, y: oy, px: ox, py: oy,
+    vx: (tx - ox) / T,
+    vy: (ty - oy - 0.5 * g * T * T) / T,
+    g, life: 0, max: 4, dmg: inv.def.dmg, rot: 0,
+  });
+  puff(ox, oy, 4, "#d8cbb0");
+}
+
+function explodeRock(p) {
+  Game.shake = Math.min(16, Game.shake + 7);
+  const hit = cellAt(p.x, p.y);
+  const cc = hit ? hit.c : colAtX(p.x);
+  const cr = hit ? hit.r : 0;
+  if (cc >= 0) {
+    for (let dc = -1; dc <= 1; dc++) {
+      for (let dr = -1; dr <= 1; dr++) {
+        const c = cc + dc, r = cr + dr;
+        if (c < 0 || c >= COLS || r < 0 || r >= ROWS) continue;
+        if (!grid[idx(c, r)]) continue;
+        const falloff = (dc === 0 && dr === 0) ? 1 : 0.45;
+        damageCell(c, r, p.dmg * falloff, null);
+      }
+    }
+  }
+  for (let i = 0; i < 14; i++) {
+    addParticle({ kind: "debris", x: p.x, y: p.y, vx: rand(-260, 260), vy: rand(-300, -40),
+      life: 0, max: rand(0.4, 0.9), r: rand(4, 11), color: "#8b8b85", spin: rand(-9, 9), rot: 0 });
+  }
+  puff(p.x, p.y, 10, "#d0c4ab");
+}
+
+function updateProjectiles(dt) {
+  for (let i = projectiles.length - 1; i >= 0; i--) {
+    const p = projectiles[i];
+    p.px = p.x; p.py = p.y;
+    p.life += dt;
+    if (p.life >= p.max) { projectiles.splice(i, 1); continue; }
+
+    if (p.kind === "arrow") {
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      let hitSomething = false;
+      for (const inv of invaders) {
+        if (inv.dead) continue;
+        const cx = inv.x, cy = inv.y - inv.def.h * 0.5;
+        if (Math.abs(p.x - cx) < inv.def.w * 0.62 && Math.abs(p.y - cy) < inv.def.h * 0.62) {
+          hurtInvader(inv, p.dmg);
+          damageText(cx, cy - 12, String(Math.round(p.dmg)), "#ffe9b0");
+          hitSomething = true;
+          break;
+        }
+      }
+      if (hitSomething || p.y > GY || p.x > W + 60) projectiles.splice(i, 1);
+
+    } else {
+      p.vy += p.g * dt;
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      p.rot += dt * 7;
+      const hit = cellAt(p.x, p.y);
+      if ((hit && grid[idx(hit.c, hit.r)]) || p.y >= GY) {
+        if (p.y >= GY) p.y = GY;
+        explodeRock(p);
+        projectiles.splice(i, 1);
+      }
+    }
+  }
+}
+
+function updateArchers(dt) {
+  for (let c = 0; c < COLS; c++) {
+    for (let r = 0; r < ROWS; r++) {
+      const cell = grid[idx(c, r)];
+      if (!cell || cell.type !== "archer") continue;
+      if (cell.cure < 1) continue;                   // uncured posts are not manned
+      cell.cd -= dt;
+      if (cell.cd <= 0) {
+        if (fireArrow(c, r)) cell.cd = BRICKS.archer.atkCd;
+        else cell.cd = 0.2;
+      }
+    }
+  }
+}
+
+/* ==========================================================================
+   Spawning — a continuous intensity curve, never discrete waves.
+   ========================================================================== */
+
+function unlockedTypes() {
+  const out = [];
+  for (const k in INVADERS) if (Game.t >= INVADERS[k].unlock) out.push(k);
+  return out;
+}
+
+function rollType() {
+  const types = unlockedTypes();
+  let total = 0;
+  for (const t of types) total += INVADERS[t].weight;
+  let x = Math.random() * total;
+  for (const t of types) { x -= INVADERS[t].weight; if (x <= 0) return t; }
+  return "grunt";
+}
+
+function spawnRate() {
+  if (Game.t < CONFIG.spawn.graceTime) return 0;
+  const t = Game.t - CONFIG.spawn.graceTime;
+  return CONFIG.spawn.base + CONFIG.spawn.growth * Math.pow(t, CONFIG.spawn.exponent);
+}
+
+function updateSpawner(dt) {
+  Game.spawnAcc += spawnRate() * dt;
+  while (Game.spawnAcc >= 1) {
+    Game.spawnAcc -= 1;
+    spawnInvader(rollType());
+  }
+
+  if (Game.t >= Game.nextSurge) {
+    Game.nextSurge += CONFIG.spawn.surgeEvery;
+    const types = unlockedTypes();
+    const heavy = types.filter(t => ["ram", "catapult", "warlord"].includes(t));
+    const pick = heavy.length ? heavy[randInt(0, heavy.length - 1)] : "grunt";
+    const n = CONFIG.spawn.surgeCount + Math.floor(Game.t / 90);
+    for (let i = 0; i < n; i++) spawnInvader(Math.random() < 0.45 ? pick : rollType());
+    showBanner(heavy.length ? "SIEGE ENGINES SIGHTED" : "THE HORDE SWELLS");
+  }
+}
+
+function showBanner(text) { Game.banner = { text, life: 0, max: 2.8 }; }
+
+/* ==========================================================================
+   Update
+   ========================================================================== */
+
+function update(dt) {
+  if (Game.state !== "playing") {
+    // Keep the world alive behind menus, minus the siege itself.
+    updateParticles(dt);
+    Game.shake *= 0.9;
+    return;
+  }
+
+  Game.t += dt;
+  Game.gold += CONFIG.economy.income * dt;
+  Game.buildCd = Math.max(0, Game.buildCd - dt);
+  Game.shake *= 0.88;
+  Game.flash = Math.max(0, Game.flash - dt * 2.2);
+  if (Game.banner) { Game.banner.life += dt; if (Game.banner.life >= Game.banner.max) Game.banner = null; }
+
+  // Curing and falling.
+  for (let i = 0; i < grid.length; i++) {
+    const cell = grid[i];
+    if (!cell) continue;
+    if (cell.cure < 1) {
+      cell.cure = Math.min(1, cell.cure + dt / CONFIG.wall.cureTime);
+      const target = BRICKS[cell.type].hp * lerp(CONFIG.wall.cureStart, 1, cell.cure);
+      cell.hp = Math.min(target, cell.hp + (BRICKS[cell.type].hp * (1 - CONFIG.wall.cureStart)) * dt / CONFIG.wall.cureTime);
+      cell.maxHp = BRICKS[cell.type].hp;
+    }
+    if (cell.fallOffset > 0) {
+      cell.fallVel += CONFIG.wall.gravity * dt;
+      cell.fallOffset -= cell.fallVel * dt;
+      if (cell.fallOffset <= 0) {
+        cell.fallOffset = 0; cell.fallVel = 0;
+        Game.shake = Math.min(10, Game.shake + 2.5);
+      }
+    }
+    if (cell.hitFlash > 0) cell.hitFlash = Math.max(0, cell.hitFlash - dt * 4);
+  }
+
+  updateSpawner(dt);
+  updateInvaders(dt);
+  updateArchers(dt);
+  updateProjectiles(dt);
+  updateParticles(dt);
+}
+
+function endRun() {
+  Game.state = "over";
+  const s = score();
+  if (s > Game.best) { Game.best = s; saveBest(s); }
+}
+
+/* ==========================================================================
+   Rendering
+   ========================================================================== */
+
+function skyAt(phase) {
+  let a = SKY[0], b = SKY[SKY.length - 1];
+  for (let i = 0; i < SKY.length - 1; i++) {
+    if (phase >= SKY[i].t && phase <= SKY[i + 1].t) { a = SKY[i]; b = SKY[i + 1]; break; }
+  }
+  const t = (phase - a.t) / Math.max(1e-6, b.t - a.t);
+  return {
+    top: mixHex(a.top, b.top, t),
+    bot: mixHex(a.bot, b.bot, t),
+    sun: mixHex(a.sun, b.sun, t),
+    dark: lerp(a.dark, b.dark, t),
+  };
+}
+
+let skyCache = { key: -1, grad: null, info: null };
+
+function drawSky() {
+  const phase = (Game.t / CONFIG.cycleTime) % 1;
+  const key = Math.floor(phase * 90);
+  if (skyCache.key !== key) {
+    const info = skyAt(phase);
+    const g = ctx.createLinearGradient(0, 0, 0, GY);
+    g.addColorStop(0, info.top);
+    g.addColorStop(1, info.bot);
+    skyCache = { key, grad: g, info };
+  }
+  ctx.fillStyle = skyCache.grad;
+  ctx.fillRect(0, 0, W, GY + 2);
+
+  // Sun / moon riding the cycle.
+  // Arc kept below the HUD band — at its peak the disc used to sit behind the
+  // translucent bar and read as a smudge on the stats.
+  const ang = phase * Math.PI * 2 - Math.PI / 2;
+  const cx = W * 0.5 + Math.cos(ang) * W * 0.42;
+  const cy = GY * 0.64 + Math.sin(ang) * GY * 0.42;
+  // Fade out toward the horizon. The hills are deliberately translucent so they
+  // pick up the sky's colour, which means a hard disc behind them shows straight
+  // through — dimming it as it sets is both the fix and the truer look.
+  const setting = clamp((470 - cy) / 140, 0, 1);
+  if (setting > 0.01) {
+    ctx.fillStyle = skyCache.info.sun;
+    ctx.globalAlpha = 0.9 * setting;
+    ctx.beginPath(); ctx.arc(cx, cy, 26, 0, 6.284); ctx.fill();
+    ctx.globalAlpha = 0.16 * setting;
+    ctx.beginPath(); ctx.arc(cx, cy, 52, 0, 6.284); ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  // Stars fade in with darkness.
+  const dark = skyCache.info.dark;
+  if (dark > 0.2) {
+    const rng = mulberry32(4242);
+    ctx.fillStyle = `rgba(255,255,255,${(dark - 0.2) * 0.9})`;
+    for (let i = 0; i < 60; i++) {
+      const x = rng() * W, y = rng() * (GY * 0.7), r = rng() * 1.6 + 0.5;
+      ctx.fillRect(x, y, r, r);
+    }
+  }
+}
+
+function damageStage(cell) {
+  const f = cell.hp / cell.maxHp;
+  return f > 0.66 ? 0 : f > 0.33 ? 1 : 2;
+}
+
+function drawWall() {
+  for (let c = 0; c < COLS; c++) {
+    for (let r = 0; r < ROWS; r++) {
+      const cell = grid[idx(c, r)];
+      if (!cell) continue;
+      const x = cellX(c), y = cellY(r) - cell.fallOffset;
+
+      if (cell.cure < 1) ctx.globalAlpha = lerp(0.55, 1, cell.cure);
+      Atlas.draw(ctx, cell.type, damageStage(cell), cell.variant, x, y, CELL);
+      ctx.globalAlpha = 1;
+
+      // Uncured mortar reads as wet and cool.
+      if (cell.cure < 1) {
+        ctx.fillStyle = `rgba(90,140,190,${0.30 * (1 - cell.cure)})`;
+        ctx.fillRect(x + 2, y + 2, CELL - 4, CELL - 4);
+        ctx.fillStyle = "rgba(255,255,255,0.75)";
+        ctx.fillRect(x + 6, y + CELL - 10, (CELL - 12) * cell.cure, 4);
+      }
+
+      // Near-white and brief: a warmer or heavier flash reads as the brick
+      // changing material rather than taking a hit.
+      if (cell.hitFlash > 0) {
+        ctx.fillStyle = `rgba(255,250,240,${cell.hitFlash * 0.34})`;
+        ctx.fillRect(x + 2, y + 2, CELL - 4, CELL - 4);
+      }
+
+      // Health sliver, only once actually damaged.
+      const f = cell.hp / cell.maxHp;
+      if (f < 0.999 && cell.cure >= 1) {
+        ctx.fillStyle = "rgba(0,0,0,0.45)";
+        ctx.fillRect(x + 8, y + 5, CELL - 16, 5);
+        ctx.fillStyle = f > 0.5 ? "#7fc46a" : f > 0.25 ? "#e0bb4c" : "#d9614c";
+        ctx.fillRect(x + 8, y + 5, (CELL - 16) * f, 5);
+      }
+    }
+  }
+}
+
+function drawBuildHints() {
+  if (Game.state !== "playing") return;
+  const tool = Game.tool;
+
+  // Faint footprint of where the wall may go.
+  ctx.strokeStyle = "rgba(255,255,255,0.055)";
+  ctx.lineWidth = 1;
+  for (let c = 0; c < COLS; c++) {
+    for (let r = 0; r < ROWS; r++) {
+      if (grid[idx(c, r)]) continue;
+      ctx.strokeRect(cellX(c) + 0.5, cellY(r) + 0.5, CELL - 1, CELL - 1);
+    }
+  }
+
+  if (!Pointer.active) return;
+  const wy = Pointer.y - (Pointer.coarse ? CONFIG.ui.touchLift : 0);
+  const at = cellAt(Pointer.x, wy);
+  if (!at) return;
+  const { c, r } = at;
+  const x = cellX(c), y = cellY(r);
+
+  if (tool === "repair" || tool === "demolish") {
+    const cell = grid[idx(c, r)];
+    const ok = !!cell && (tool === "demolish" || cell.hp < cell.maxHp);
+    ctx.strokeStyle = ok ? (tool === "repair" ? "#8fe08a" : "#e0a06a") : "rgba(255,255,255,0.25)";
+    ctx.lineWidth = 4;
+    ctx.strokeRect(x + 2, y + 2, CELL - 4, CELL - 4);
+    if (ok && tool === "demolish") {
+      ctx.strokeStyle = "#e0a06a";
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      ctx.moveTo(x + 22, y + 22); ctx.lineTo(x + CELL - 22, y + CELL - 22);
+      ctx.moveTo(x + CELL - 22, y + 22); ctx.lineTo(x + 22, y + CELL - 22);
+      ctx.stroke();
+    }
+    return;
+  }
+
+  const def = BRICKS[tool];
+  const ok = canPlace(tool, c, r) && Game.gold >= def.cost;
+  ctx.globalAlpha = 0.55;
+  Atlas.draw(ctx, tool, 0, 0, x, y, CELL);
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = ok ? "#8fe08a" : "#e0655a";
+  ctx.lineWidth = 4;
+  ctx.strokeRect(x + 2, y + 2, CELL - 4, CELL - 4);
+  if (!ok) {
+    ctx.fillStyle = "rgba(210,60,50,0.22)";
+    ctx.fillRect(x + 2, y + 2, CELL - 4, CELL - 4);
+  }
+
+  // Cost tag, drawn above the ghost so a thumb never covers it.
+  ctx.font = "600 22px system-ui, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  const label = def.cost + "g";
+  const tw = ctx.measureText(label).width + 18;
+  ctx.fillStyle = "rgba(12,14,20,0.82)";
+  roundRect(ctx, x + CELL / 2 - tw / 2, y - 34, tw, 26, 6);
+  ctx.fill();
+  ctx.fillStyle = ok ? "#f2cf6b" : "#e0655a";
+  ctx.fillText(label, x + CELL / 2, y - 21);
+}
+
+function roundRect(c, x, y, w, h, r) {
+  c.beginPath();
+  c.moveTo(x + r, y);
+  c.arcTo(x + w, y, x + w, y + h, r);
+  c.arcTo(x + w, y + h, x, y + h, r);
+  c.arcTo(x, y + h, x, y, r);
+  c.arcTo(x, y, x + w, y, r);
+  c.closePath();
+}
+
+function drawInvader(inv, alpha) {
+  const d = inv.def;
+  const x = lerp(inv.px, inv.x, alpha);
+  const y = lerp(inv.py, inv.y, alpha);
+  const walking = inv.state === "advance" || inv.state === "ontop";
+  const bob = walking ? Math.sin(inv.phase * 2) * 2 : 0;
+  const swing = walking ? Math.sin(inv.phase * 2) : 0;
+
+  ctx.save();
+  ctx.translate(x, y + bob);
+
+  if (inv.buff > 0) {
+    ctx.fillStyle = "rgba(190,140,255,0.20)";
+    ctx.beginPath(); ctx.ellipse(0, -d.h * 0.5, d.w * 0.95, d.h * 0.68, 0, 0, 6.284); ctx.fill();
+  }
+
+  // Contact shadow.
+  ctx.fillStyle = "rgba(0,0,0,0.25)";
+  ctx.beginPath(); ctx.ellipse(0, 2, d.w * 0.55, 5, 0, 0, 6.284); ctx.fill();
+
+  if (inv.type === "ram") drawRam(inv, swing);
+  else if (inv.type === "catapult") drawCatapult(inv);
+  else drawFootman(inv, swing);
+
+  if (inv.hitFlash > 0) {
+    ctx.globalAlpha = inv.hitFlash * 0.7;
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(-d.w / 2, -d.h, d.w, d.h);
+    ctx.globalAlpha = 1;
+  }
+  ctx.restore();
+
+  // Health bar once hurt.
+  if (inv.hp < inv.maxHp) {
+    const bw = Math.max(30, d.w);
+    const f = clamp(inv.hp / inv.maxHp, 0, 1);
+    ctx.fillStyle = "rgba(0,0,0,0.55)";
+    ctx.fillRect(x - bw / 2, y - d.h - 14, bw, 5);
+    ctx.fillStyle = f > 0.5 ? "#7fc46a" : f > 0.25 ? "#e0bb4c" : "#d9614c";
+    ctx.fillRect(x - bw / 2, y - d.h - 14, bw * f, 5);
+  }
+}
+
+function drawFootman(inv, swing) {
+  const d = inv.def;
+  const w = d.w, h = d.h;
+
+  // Legs.
+  ctx.strokeStyle = "#2f2620";
+  ctx.lineWidth = 5;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(-3, -h * 0.34); ctx.lineTo(-3 + swing * 7, 0);
+  ctx.moveTo(3, -h * 0.34);  ctx.lineTo(3 - swing * 7, 0);
+  ctx.stroke();
+
+  // Body.
+  ctx.fillStyle = d.body;
+  roundRect(ctx, -w / 2, -h * 0.80, w, h * 0.48, 5);
+  ctx.fill();
+  ctx.fillStyle = d.trim;
+  ctx.fillRect(-w / 2, -h * 0.58, w, 4);
+
+  // Head + helm.
+  ctx.fillStyle = "#d9b48c";
+  ctx.beginPath(); ctx.arc(0, -h * 0.88, w * 0.32, 0, 6.284); ctx.fill();
+  ctx.fillStyle = d.trim;
+  ctx.beginPath();
+  ctx.arc(0, -h * 0.90, w * 0.34, Math.PI, 0);
+  ctx.fill();
+
+  // Weapon / signature per type.
+  if (inv.type === "grunt") {
+    ctx.strokeStyle = "#5a4632"; ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(-w * 0.55, -h * 0.30); ctx.lineTo(-w * 0.75, -h * 0.85);
+    ctx.stroke();
+    ctx.fillStyle = "#8a8a90";
+    ctx.fillRect(-w * 0.92, -h * 1.02, 18, 14);
+  } else if (inv.type === "climber") {
+    // Ladder on the shoulder.
+    ctx.strokeStyle = "#7a5a34"; ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(-w * 0.1, -h * 1.02); ctx.lineTo(w * 0.95, -h * 0.62);
+    ctx.moveTo(-w * 0.02, -h * 0.86); ctx.lineTo(w * 1.03, -h * 0.46);
+    ctx.stroke();
+    ctx.lineWidth = 2;
+    for (let i = 0; i < 4; i++) {
+      const t = i / 3;
+      ctx.beginPath();
+      ctx.moveTo(lerp(-w * 0.1, w * 0.95, t), lerp(-h * 1.02, -h * 0.62, t));
+      ctx.lineTo(lerp(-w * 0.02, w * 1.03, t), lerp(-h * 0.86, -h * 0.46, t));
+      ctx.stroke();
+    }
+  } else if (inv.type === "sapper") {
+    const pulse = inv.state === "fuse" ? (0.5 + Math.sin(inv.fuse * 40) * 0.5) : 0.35;
+    ctx.fillStyle = "#2e2a26";
+    ctx.beginPath(); ctx.arc(-w * 0.55, -h * 0.5, 11, 0, 6.284); ctx.fill();
+    ctx.fillStyle = `rgba(255,${140 + pulse * 100},60,${0.6 + pulse * 0.4})`;
+    ctx.beginPath(); ctx.arc(-w * 0.55, -h * 0.68, 4 + pulse * 3, 0, 6.284); ctx.fill();
+  } else if (inv.type === "warlord") {
+    ctx.strokeStyle = "#d4b0ff"; ctx.lineWidth = 5;
+    ctx.beginPath();
+    ctx.moveTo(-w * 0.6, -h * 0.2); ctx.lineTo(-w * 0.85, -h * 0.95);
+    ctx.stroke();
+    // Horned helm.
+    ctx.fillStyle = "#d4b0ff";
+    ctx.beginPath();
+    ctx.moveTo(-w * 0.34, -h * 0.98); ctx.lineTo(-w * 0.6, -h * 1.2); ctx.lineTo(-w * 0.2, -h * 1.03);
+    ctx.moveTo(w * 0.34, -h * 0.98);  ctx.lineTo(w * 0.6, -h * 1.2);  ctx.lineTo(w * 0.2, -h * 1.03);
+    ctx.fill();
+    // Cape.
+    ctx.fillStyle = "rgba(90,60,140,0.85)";
+    ctx.beginPath();
+    ctx.moveTo(w * 0.35, -h * 0.78);
+    ctx.lineTo(w * 0.85, -h * 0.1);
+    ctx.lineTo(w * 0.2, -h * 0.2);
+    ctx.closePath(); ctx.fill();
+  }
+}
+
+function drawRam(inv, swing) {
+  const d = inv.def, w = d.w, h = d.h;
+  const recoil = inv.state === "attack" ? Math.max(0, Math.sin(inv.cd * 6)) * 8 : 0;
+
+  // Crew.
+  ctx.fillStyle = "#4a3b2e";
+  for (let i = 0; i < 3; i++) {
+    const px = -w * 0.2 + i * 22;
+    ctx.fillRect(px - 5, -h * 0.9, 11, h * 0.55);
+    ctx.beginPath(); ctx.arc(px, -h * 0.95, 7, 0, 6.284); ctx.fill();
+  }
+
+  // Frame + wheels.
+  ctx.fillStyle = d.trim;
+  ctx.fillRect(-w / 2, -h * 0.42, w, 9);
+  ctx.fillStyle = "#3d3833";
+  for (const wx of [-w * 0.32, w * 0.28]) {
+    ctx.beginPath(); ctx.arc(wx, -11, 13, 0, 6.284); ctx.fill();
+    ctx.strokeStyle = "#6b6259"; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(wx, -11, 7, 0, 6.284); ctx.stroke();
+  }
+
+  // The log.
+  ctx.save();
+  ctx.translate(recoil, 0);
+  ctx.fillStyle = "#6b4f33";
+  roundRect(ctx, -w * 0.62, -h * 0.66, w * 1.1, 20, 9);
+  ctx.fill();
+  ctx.fillStyle = "#8a8a90";
+  roundRect(ctx, -w * 0.66, -h * 0.68, 20, 24, 5);
+  ctx.fill();
+  ctx.strokeStyle = "#4a3728"; ctx.lineWidth = 3;
+  for (let i = 0; i < 3; i++) {
+    const x = -w * 0.3 + i * 24;
+    ctx.beginPath(); ctx.moveTo(x, -h * 0.66); ctx.lineTo(x, -h * 0.66 + 20); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawCatapult(inv) {
+  const d = inv.def, w = d.w, h = d.h;
+  const t = clamp(1 - inv.cd / d.atkCd, 0, 1);
+  const armAng = -0.5 - Math.sin(t * Math.PI) * 1.5;
+
+  ctx.fillStyle = "#3d3833";
+  for (const wx of [-w * 0.3, w * 0.3]) {
+    ctx.beginPath(); ctx.arc(wx, -12, 14, 0, 6.284); ctx.fill();
+  }
+  ctx.fillStyle = d.body;
+  ctx.fillRect(-w / 2, -h * 0.5, w, 12);
+  ctx.fillStyle = d.trim;
+  ctx.beginPath();
+  ctx.moveTo(-8, -h * 0.5); ctx.lineTo(8, -h * 0.5); ctx.lineTo(0, -h * 1.05);
+  ctx.closePath(); ctx.fill();
+
+  ctx.save();
+  ctx.translate(0, -h * 1.0);
+  ctx.rotate(armAng);
+  ctx.fillStyle = "#6b4f33";
+  ctx.fillRect(-6, -4, w * 0.85, 9);
+  ctx.fillStyle = "#4a4038";
+  ctx.beginPath(); ctx.arc(w * 0.85, 0, 10, 0, 6.284); ctx.fill();
+  ctx.restore();
+
+  ctx.fillStyle = "#4a3b2e";
+  ctx.fillRect(w * 0.28, -h * 0.9, 11, h * 0.42);
+  ctx.beginPath(); ctx.arc(w * 0.33, -h * 0.95, 7, 0, 6.284); ctx.fill();
+}
+
+function drawProjectiles(alpha) {
+  for (const p of projectiles) {
+    const x = lerp(p.px, p.x, alpha), y = lerp(p.py, p.y, alpha);
+    if (p.kind === "arrow") {
+      const ang = Math.atan2(p.vy, p.vx);
+      ctx.save();
+      ctx.translate(x, y); ctx.rotate(ang);
+      ctx.strokeStyle = "rgba(255,240,200,0.35)";
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(-26, 0); ctx.lineTo(-6, 0); ctx.stroke();
+      ctx.strokeStyle = "#4a3b28"; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.moveTo(-10, 0); ctx.lineTo(8, 0); ctx.stroke();
+      ctx.fillStyle = "#cfd4dc";
+      ctx.beginPath(); ctx.moveTo(8, -3); ctx.lineTo(16, 0); ctx.lineTo(8, 3); ctx.closePath(); ctx.fill();
+      ctx.restore();
+    } else {
+      ctx.save();
+      ctx.translate(x, y); ctx.rotate(p.rot);
+      ctx.fillStyle = "#75736c";
+      ctx.beginPath(); ctx.arc(0, 0, 13, 0, 6.284); ctx.fill();
+      ctx.fillStyle = "#8e8c84";
+      ctx.beginPath(); ctx.arc(-4, -4, 6, 0, 6.284); ctx.fill();
+      ctx.restore();
+    }
+  }
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    const k = 1 - p.life / p.max;
+    if (p.kind === "text") {
+      ctx.globalAlpha = clamp(k * 1.6, 0, 1);
+      ctx.font = "700 26px system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillStyle = "rgba(0,0,0,0.5)";
+      ctx.fillText(p.text, p.x + 1.5, p.y + 1.5);
+      ctx.fillStyle = p.color;
+      ctx.fillText(p.text, p.x, p.y);
+    } else if (p.kind === "debris") {
+      ctx.globalAlpha = clamp(k * 1.4, 0, 1);
+      ctx.save();
+      ctx.translate(p.x, p.y); ctx.rotate(p.rot);
+      ctx.fillStyle = p.color;
+      ctx.fillRect(-p.r / 2, -p.r / 2, p.r, p.r);
+      ctx.restore();
+    } else {
+      ctx.globalAlpha = clamp(k * 0.55, 0, 1);
+      ctx.fillStyle = p.color;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r * (1.6 - k * 0.6), 0, 6.284); ctx.fill();
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+/* ---- HUD ---------------------------------------------------------------- */
+
+const PAUSE_BTN = { x: W - 78, y: 10, w: 62, h: 40 };
+
+function drawHud() {
+  ctx.fillStyle = "rgba(10,12,18,0.55)";
+  ctx.fillRect(0, 0, W, CONFIG.ui.hudH);
+  ctx.fillStyle = "rgba(255,255,255,0.07)";
+  ctx.fillRect(0, CONFIG.ui.hudH - 2, W, 2);
+
+  ctx.textBaseline = "middle";
+  const cy = CONFIG.ui.hudH / 2;
+
+  // Gold.
+  ctx.fillStyle = "#f2cf6b";
+  ctx.beginPath(); ctx.arc(28, cy, 12, 0, 6.284); ctx.fill();
+  ctx.fillStyle = "#b8952f";
+  ctx.beginPath(); ctx.arc(28, cy, 6, 0, 6.284); ctx.fill();
+  ctx.font = "700 30px system-ui, sans-serif";
+  ctx.textAlign = "left";
+  ctx.fillStyle = "#f6e2a8";
+  ctx.fillText(String(Math.floor(Game.gold)), 48, cy + 1);
+
+  // Keep integrity.
+  const bx = 178, bw = 210, bh = 20;
+  ctx.font = "600 17px system-ui, sans-serif";
+  ctx.fillStyle = "#9aa2b0";
+  ctx.fillText("KEEP", bx, cy - 13);
+  ctx.fillStyle = "rgba(0,0,0,0.5)";
+  roundRect(ctx, bx, cy - 2, bw, bh, 5); ctx.fill();
+  const f = clamp(Game.integrity / CONFIG.keep.integrity, 0, 1);
+  if (f > 0.005) {
+    ctx.fillStyle = f > 0.5 ? "#5fa9d8" : f > 0.25 ? "#e0bb4c" : "#d9614c";
+    roundRect(ctx, bx, cy - 2, Math.max(bh, bw * f), bh, 5); ctx.fill();
+  }
+  ctx.fillStyle = "#e9eef5";
+  ctx.font = "700 15px system-ui, sans-serif";
+  ctx.textAlign = "right";
+  ctx.fillText(Math.ceil(Game.integrity) + "%", bx + bw - 8, cy + 8);
+
+  // Time + kills. Positions are measured rather than guessed, so a growing kill
+  // count can never run into its own label.
+  ctx.textAlign = "left";
+  let x = 434;
+  const stat = (value, label) => {
+    ctx.font = "700 28px system-ui, sans-serif";
+    ctx.fillStyle = "#e9eef5";
+    ctx.fillText(value, x, cy + 1);
+    x += ctx.measureText(value).width + 9;
+    ctx.font = "600 20px system-ui, sans-serif";
+    ctx.fillStyle = "#9aa2b0";
+    ctx.fillText(label, x, cy + 3);
+    x += ctx.measureText(label).width + 30;
+  };
+  stat(fmtTime(Game.t), "survived");
+  stat(String(Game.stopped), "stopped");
+
+  // Pause button.
+  ctx.fillStyle = "rgba(255,255,255,0.10)";
+  roundRect(ctx, PAUSE_BTN.x, PAUSE_BTN.y, PAUSE_BTN.w, PAUSE_BTN.h, 8); ctx.fill();
+  ctx.fillStyle = "#e9eef5";
+  if (Game.state === "paused") {
+    ctx.beginPath();
+    ctx.moveTo(PAUSE_BTN.x + 24, PAUSE_BTN.y + 11);
+    ctx.lineTo(PAUSE_BTN.x + 42, PAUSE_BTN.y + 20);
+    ctx.lineTo(PAUSE_BTN.x + 24, PAUSE_BTN.y + 29);
+    ctx.closePath(); ctx.fill();
+  } else {
+    ctx.fillRect(PAUSE_BTN.x + 22, PAUSE_BTN.y + 11, 6, 18);
+    ctx.fillRect(PAUSE_BTN.x + 34, PAUSE_BTN.y + 11, 6, 18);
+  }
+}
+
+function toolbarLayout() {
+  const n = TOOLS.length;
+  const total = n * CONFIG.ui.btnW + (n - 1) * CONFIG.ui.btnGap;
+  const x0 = (W - total) / 2;
+  return TOOLS.map((t, i) => ({
+    tool: t,
+    x: x0 + i * (CONFIG.ui.btnW + CONFIG.ui.btnGap),
+    y: CONFIG.ui.toolbarY,
+    w: CONFIG.ui.btnW,
+    h: CONFIG.ui.toolbarH,
+  }));
+}
+
+function drawToolbar() {
+  ctx.fillStyle = "rgba(10,12,18,0.72)";
+  ctx.fillRect(0, CONFIG.ui.toolbarY - 8, W, H - CONFIG.ui.toolbarY + 8);
+  ctx.fillStyle = "rgba(255,255,255,0.07)";
+  ctx.fillRect(0, CONFIG.ui.toolbarY - 8, W, 2);
+
+  for (const b of toolbarLayout()) {
+    const id = b.tool.id;
+    const sel = Game.tool === id;
+    const cost = BRICKS[id] ? BRICKS[id].cost : (id === "repair" ? CONFIG.economy.repairCost : 0);
+    const afford = Game.gold >= cost;
+
+    ctx.fillStyle = sel ? "rgba(242,207,107,0.18)" : "rgba(255,255,255,0.06)";
+    roundRect(ctx, b.x, b.y, b.w, b.h, 10); ctx.fill();
+    ctx.strokeStyle = sel ? "#f2cf6b" : "rgba(255,255,255,0.12)";
+    ctx.lineWidth = sel ? 3 : 1.5;
+    roundRect(ctx, b.x, b.y, b.w, b.h, 10); ctx.stroke();
+
+    ctx.globalAlpha = afford ? 1 : 0.42;
+
+    // Icon.
+    const ix = b.x + b.w / 2, iy = b.y + 30;
+    if (BRICKS[id]) {
+      Atlas.draw(ctx, id, 0, 1, ix - 21, iy - 21, 42);
+    } else if (id === "repair") {
+      ctx.strokeStyle = "#8fe08a"; ctx.lineWidth = 6; ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(ix - 13, iy); ctx.lineTo(ix + 13, iy);
+      ctx.moveTo(ix, iy - 13); ctx.lineTo(ix, iy + 13);
+      ctx.stroke();
+    } else {
+      ctx.strokeStyle = "#e0a06a"; ctx.lineWidth = 6; ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(ix - 12, iy - 12); ctx.lineTo(ix + 12, iy + 12);
+      ctx.moveTo(ix + 12, iy - 12); ctx.lineTo(ix - 12, iy + 12);
+      ctx.stroke();
+    }
+
+    ctx.font = "600 18px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = sel ? "#f6e2a8" : "#c3c9d4";
+    ctx.fillText(b.tool.label, ix, b.y + 62);
+
+    ctx.font = "700 17px system-ui, sans-serif";
+    ctx.fillStyle = id === "demolish" ? "#8fe08a" : (afford ? "#f2cf6b" : "#e0655a");
+    ctx.fillText(id === "demolish" ? "+50%" : cost + "g", ix, b.y + 82);
+
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawBanner() {
+  if (!Game.banner) return;
+  const k = Game.banner.life / Game.banner.max;
+  const a = k < 0.15 ? k / 0.15 : k > 0.75 ? (1 - k) / 0.25 : 1;
+  ctx.globalAlpha = clamp(a, 0, 1);
+  ctx.font = "700 40px Georgia, serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  const y = 148;
+  const tw = ctx.measureText(Game.banner.text).width;
+  ctx.fillStyle = "rgba(120,30,30,0.78)";
+  roundRect(ctx, W / 2 - tw / 2 - 30, y - 30, tw + 60, 60, 8); ctx.fill();
+  ctx.strokeStyle = "rgba(242,207,107,0.6)"; ctx.lineWidth = 2;
+  roundRect(ctx, W / 2 - tw / 2 - 30, y - 30, tw + 60, 60, 8); ctx.stroke();
+  ctx.fillStyle = "#ffe9b0";
+  ctx.fillText(Game.banner.text, W / 2, y + 2);
+  ctx.globalAlpha = 1;
+}
+
+function drawOverlay() {
+  if (Game.state === "playing") return;
+
+  ctx.fillStyle = "rgba(6,8,14,0.78)";
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+
+  if (Game.state === "menu") {
+    ctx.fillStyle = "#f2cf6b";
+    ctx.font = "700 76px Georgia, serif";
+    ctx.fillText("WALL BUILDER", W / 2, 168);
+
+    ctx.fillStyle = "#c3c9d4";
+    ctx.font = "400 26px Georgia, serif";
+    ctx.fillText("They are coming. Lay brick until they stop.", W / 2, 226);
+
+    ctx.font = "400 22px system-ui, sans-serif";
+    ctx.fillStyle = "#9aa2b0";
+    const lines = [
+      "Tap the ground to lay a brick — drag to lay a run.",
+      "Bricks need something beneath them, and take a moment to cure.",
+      "Break the base of a column and everything above it comes down.",
+      "Build tall against climbers, thick against rams, and mind the catapults.",
+    ];
+    lines.forEach((l, i) => ctx.fillText(l, W / 2, 300 + i * 34));
+
+    if (Game.best > 0) {
+      ctx.fillStyle = "#f2cf6b";
+      ctx.font = "600 24px system-ui, sans-serif";
+      ctx.fillText("Best siege held: " + Game.best, W / 2, 464);
+    }
+
+    drawBigButton("BEGIN THE SIEGE", W / 2, 546);
+
+  } else if (Game.state === "paused") {
+    ctx.fillStyle = "#e9eef5";
+    ctx.font = "700 60px Georgia, serif";
+    ctx.fillText("PAUSED", W / 2, 268);
+    ctx.fillStyle = "#9aa2b0";
+    ctx.font = "400 24px system-ui, sans-serif";
+    ctx.fillText("The siege waits.", W / 2, 322);
+    drawBigButton("RESUME", W / 2, 420);
+
+  } else if (Game.state === "over") {
+    ctx.fillStyle = "#d9614c";
+    ctx.font = "700 68px Georgia, serif";
+    ctx.fillText("THE KEEP HAS FALLEN", W / 2, 178);
+
+    const s = score();
+    ctx.fillStyle = "#e9eef5";
+    ctx.font = "700 54px system-ui, sans-serif";
+    ctx.fillText(String(s), W / 2, 268);
+    ctx.fillStyle = "#9aa2b0";
+    ctx.font = "600 22px system-ui, sans-serif";
+    ctx.fillText("SCORE", W / 2, 308);
+
+    ctx.font = "400 25px system-ui, sans-serif";
+    ctx.fillStyle = "#c3c9d4";
+    ctx.fillText(`Held for ${fmtTime(Game.t)}   ·   ${Game.stopped} invaders stopped   ·   ${Game.breaches} got through`,
+      W / 2, 366);
+
+    ctx.font = "600 24px system-ui, sans-serif";
+    ctx.fillStyle = s >= Game.best ? "#f2cf6b" : "#9aa2b0";
+    ctx.fillText(s >= Game.best ? "A new best." : "Best: " + Game.best, W / 2, 414);
+
+    drawBigButton("BUILD AGAIN", W / 2, 512);
+  }
+}
+
+const BIG_BTN = { w: 380, h: 74 };
+function bigButtonRect(cx, cy) {
+  return { x: cx - BIG_BTN.w / 2, y: cy - BIG_BTN.h / 2, w: BIG_BTN.w, h: BIG_BTN.h };
+}
+let bigBtnAt = null;
+
+function drawBigButton(label, cx, cy) {
+  const r = bigButtonRect(cx, cy);
+  bigBtnAt = r;
+  ctx.fillStyle = "rgba(242,207,107,0.16)";
+  roundRect(ctx, r.x, r.y, r.w, r.h, 12); ctx.fill();
+  ctx.strokeStyle = "#f2cf6b"; ctx.lineWidth = 3;
+  roundRect(ctx, r.x, r.y, r.w, r.h, 12); ctx.stroke();
+  ctx.fillStyle = "#f6e2a8";
+  ctx.font = "700 30px Georgia, serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(label, cx, cy + 2);
+}
+
+function render(alpha) {
+  const sx = Game.shake > 0.1 ? rand(-Game.shake, Game.shake) : 0;
+  const sy = Game.shake > 0.1 ? rand(-Game.shake, Game.shake) : 0;
+
+  // Letterbox bars.
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = "#0b0d14";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  Viewport.applyTransform(sx, sy);
+
+  drawSky();
+  ctx.drawImage(Terrain.canvas, 0, 0, W, H);
+
+  // Night wash over the landscape and everything standing on it.
+  const dark = skyCache.info ? skyCache.info.dark : 0;
+
+  drawWall();
+  drawBuildHints();
+  for (const inv of invaders) drawInvader(inv, alpha);
+  drawProjectiles(alpha);
+  drawParticles();
+
+  if (dark > 0.01) {
+    ctx.fillStyle = `rgba(10,14,40,${dark * 0.5})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  if (Game.flash > 0) {
+    ctx.fillStyle = `rgba(190,40,30,${Game.flash * 0.28})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  bigBtnAt = null;
+  drawBanner();
+  drawHud();
+  drawToolbar();
+  drawOverlay();
+}
+
+/* ==========================================================================
+   Input — Pointer Events only, so mouse / touch / stylus share one path.
+   ========================================================================== */
+
+function toolAtPoint(wx, wy) {
+  for (const b of toolbarLayout()) {
+    if (wx >= b.x && wx <= b.x + b.w && wy >= b.y && wy <= b.y + b.h) return b.tool.id;
+  }
+  return null;
+}
+
+function inRect(wx, wy, r) {
+  return r && wx >= r.x && wx <= r.x + r.w && wy >= r.y && wy <= r.y + r.h;
+}
+
+function applyTool(wx, wy) {
+  if (Game.state !== "playing") return;
+  if (Game.buildCd > 0) return;
+
+  const lifted = wy - (Pointer.coarse ? CONFIG.ui.touchLift : 0);
+  const at = cellAt(wx, lifted);
+  if (!at) return;
+  const { c, r } = at;
+
+  let acted = false;
+  if (Game.tool === "repair") acted = repairCell(c, r);
+  else if (Game.tool === "demolish") acted = demolishCell(c, r);
+  else acted = placeBrick(Game.tool, c, r);
+
+  if (acted) Game.buildCd = CONFIG.economy.buildCooldown;
+}
+
+function onDown(e) {
+  e.preventDefault();
+  if (Pointer.id !== null && e.pointerId !== Pointer.id) return;  // ignore extra fingers
+  Pointer.id = e.pointerId;
+  Pointer.coarse = e.pointerType !== "mouse";
+
+  const p = Viewport.toWorld(e.clientX, e.clientY);
+  Pointer.x = p.x; Pointer.y = p.y;
+  Pointer.down = true;
+  Pointer.active = true;
+
+  // Overlay buttons take priority.
+  if (Game.state !== "playing") {
+    if (inRect(p.x, p.y, bigBtnAt) || Game.state === "menu" || Game.state === "over") {
+      if (Game.state === "menu" || Game.state === "over") {
+        if (inRect(p.x, p.y, bigBtnAt)) { resetGame(); Game.state = "playing"; }
+      } else if (Game.state === "paused") {
+        Game.state = "playing";
+      }
+      return;
+    }
+  }
+
+  if (inRect(p.x, p.y, PAUSE_BTN)) {
+    if (Game.state === "playing") Game.state = "paused";
+    else if (Game.state === "paused") Game.state = "playing";
+    return;
+  }
+
+  if (Game.state === "paused") { Game.state = "playing"; return; }
+  if (Game.state !== "playing") return;
+
+  const t = toolAtPoint(p.x, p.y);
+  if (t) { Game.tool = t; return; }
+
+  applyTool(p.x, p.y);
+}
+
+function onMove(e) {
+  if (Pointer.id !== null && e.pointerId !== Pointer.id && Pointer.down) return;
+  const p = Viewport.toWorld(e.clientX, e.clientY);
+  Pointer.x = p.x; Pointer.y = p.y;
+  Pointer.active = true;
+  if (e.pointerType) Pointer.coarse = e.pointerType !== "mouse";
+
+  if (!Pointer.down) return;
+  e.preventDefault();
+  // Dragging over the toolbar should not paint bricks behind it.
+  if (p.y >= CONFIG.ui.toolbarY - 8) return;
+  applyTool(p.x, p.y);
+}
+
+function onUp(e) {
+  if (Pointer.id !== null && e.pointerId !== Pointer.id) return;
+  Pointer.down = false;
+  Pointer.id = null;
+  if (e.pointerType && e.pointerType !== "mouse") Pointer.active = false;
+}
+
+// pointercancel fires when the OS steals the touch (system gesture, incoming call).
+// Without this a half-finished drag would leave the pointer stuck "down".
+function onCancel() {
+  Pointer.down = false;
+  Pointer.id = null;
+  Pointer.active = false;
+}
+
+canvas.addEventListener("pointerdown", onDown, { passive: false });
+canvas.addEventListener("pointermove", onMove, { passive: false });
+window.addEventListener("pointerup", onUp);
+window.addEventListener("pointercancel", onCancel);
+canvas.addEventListener("pointerleave", () => { if (!Pointer.coarse) Pointer.active = false; });
+canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+
+window.addEventListener("keydown", (e) => {
+  if (e.key === " ") {
+    e.preventDefault();
+    if (Game.state === "playing") Game.state = "paused";
+    else if (Game.state === "paused") Game.state = "playing";
+    else if (Game.state === "menu" || Game.state === "over") { resetGame(); Game.state = "playing"; }
+    return;
+  }
+  if (e.key === "Enter" && (Game.state === "menu" || Game.state === "over")) {
+    resetGame(); Game.state = "playing"; return;
+  }
+  const t = TOOLS.find(t => t.key === e.key);
+  if (t) Game.tool = t.id;
+  if (e.key.toLowerCase() === "r") Game.tool = "repair";
+});
+
+// Right-click razes, on desktop only — on touch, Raze is a toolbar mode.
+canvas.addEventListener("mousedown", (e) => {
+  if (e.button !== 2 || Game.state !== "playing") return;
+  const p = Viewport.toWorld(e.clientX, e.clientY);
+  const at = cellAt(p.x, p.y);
+  if (at) demolishCell(at.c, at.r);
+});
+
+// Phones get interrupted. Coming back to a destroyed kingdom is a bad experience.
+function autoPause() {
+  if (Game.state === "playing") Game.state = "paused";
+}
+document.addEventListener("visibilitychange", () => { if (document.hidden) autoPause(); });
+window.addEventListener("blur", autoPause);
+
+window.addEventListener("resize", () => Viewport.resize());
+window.addEventListener("orientationchange", () => setTimeout(() => Viewport.resize(), 120));
+if (window.visualViewport) {
+  window.visualViewport.addEventListener("resize", () => Viewport.resize());
+  window.visualViewport.addEventListener("scroll", () => Viewport.resize());
+}
+
+/* ==========================================================================
+   Loop — fixed 60Hz logic with interpolated rendering, so collapse physics
+   stay stable and a 120Hz phone display doesn't run the siege twice as fast.
+   ========================================================================== */
+
+const STEP = 1 / 60;
+let acc = 0, last = performance.now();
+
+function frame(now) {
+  Viewport.sync();
+  let dt = (now - last) / 1000;
+  last = now;
+  dt = Math.min(dt, 0.25);      // a backgrounded tab must not spiral on resume
+  acc += dt;
+
+  let guard = 0;
+  while (acc >= STEP && guard++ < 8) {
+    update(STEP);
+    acc -= STEP;
+  }
+  if (guard >= 8) acc = 0;
+
+  render(acc / STEP);
+  requestAnimationFrame(frame);
+}
+
+Game.best = loadBest();
+resetGame();
+Viewport.resize();
+requestAnimationFrame(frame);
+
+/* Exposed for debugging and automated checks. */
+window.__game = {
+  Game, CONFIG, Viewport, BRICKS, INVADERS,
+  get grid() { return grid; },
+  get invaders() { return invaders; },
+  get projectiles() { return projectiles; },
+  get particles() { return particles; },
+  columnHeight, cellAt, placeBrick, damageCell, settle, spawnInvader, score,
+  start() { resetGame(); Game.state = "playing"; },
+  // Run the simulation forward without waiting on real time — used for long-run checks.
+  fastForward(seconds) {
+    const n = Math.floor(seconds / STEP);
+    for (let i = 0; i < n; i++) update(STEP);
+  },
+  // Invariants that must hold at all times.
+  audit() {
+    const problems = [];
+    for (let c = 0; c < COLS; c++) {
+      let seenGap = false;
+      for (let r = 0; r < ROWS; r++) {
+        if (!grid[idx(c, r)]) seenGap = true;
+        else if (seenGap) problems.push(`floating brick at col ${c} row ${r}`);
+      }
+    }
+    for (let i = 0; i < grid.length; i++) {
+      const cell = grid[i];
+      if (cell && cell.hp <= 0) problems.push(`dead brick still in grid at ${i}`);
+    }
+    if (Game.gold < 0) problems.push(`negative gold: ${Game.gold}`);
+    const states = new Set(["advance", "wait", "attack", "fuse", "climb", "ontop", "ranged", "fall"]);
+    for (const [c, n] of frontage) {
+      if (n > CONFIG.combat.frontage) problems.push(`frontage overflow on col ${c}: ${n}`);
+    }
+    for (const inv of invaders) {
+      if (!states.has(inv.state)) problems.push(`invader in unknown state ${inv.state}`);
+      if (!isFinite(inv.x) || !isFinite(inv.y)) problems.push(`invader at non-finite position`);
+    }
+    return {
+      ok: problems.length === 0,
+      problems,
+      counts: { invaders: invaders.length, projectiles: projectiles.length, particles: particles.length },
+      cellCss: +Viewport.cellCssSize().toFixed(1),
+    };
+  },
+};
+</script>
