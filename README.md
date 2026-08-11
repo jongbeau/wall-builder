@@ -143,11 +143,14 @@ The dials that matter most:
   `wallBase` and they will detour further; lower it and they smash through sooner.
 - `CONFIG.combat.frontage` — attackers per tile. The single most powerful lever on difficulty.
 - `CONFIG.spawn.growth` / `exponent` — how fast the siege escalates. It ramps forever.
-- `CONFIG.board.planX` / `planY` / `uw` / `uh` / `zh` — board size and tile geometry, all coupled.
-  Both axes are at their limit at 14×14: width is `planX × uw` against the palette, height is
-  `planY × uh` plus a full stack of clearance above the far corner. Growing the board means shrinking
-  the tile, and tile spacing is what a thumb needs — 23.5 CSS px here, which is why touch commits on
-  release.
+- `CONFIG.board.rect` — the screen area tiles must fall inside. The board is the set of tiles landing
+  in this rectangle, not a diamond, which is the whole point: a diamond can only cover half its
+  bounding box, so the screen corners were going to waste. Filling a rectangle instead buys ~50% more
+  area, and therefore much bigger tiles for the same count. `y0` is solved for at load, from the HUD
+  height plus a stack of clearance.
+- `CONFIG.board.uw` / `uh` / `zh` — starting tile geometry only. `fitBoard()` overrides them at load
+  with the **largest** tile that still yields ~200 tiles in the rectangle, so a wider screen spends
+  its extra room on bigger tiles rather than more of them.
 - `CONFIG.board.keepPlan` — the keep's footprint in plan units. A difficulty dial in disguise: a
   bigger keep has more tiles touching it, which multiplies both the wall you must maintain and the
   number of attackers that can reach it at once. Change it and `economy.income` has to follow.
