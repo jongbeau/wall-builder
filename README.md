@@ -69,7 +69,8 @@ few tiles you must frantically repair, or a longer maze that keeps them walking 
 your archers can work.
 
 Bricks are real bricks — a 2:1 rectangle covering half a tile — and **every tile holds two of
-them**, side by side. That is 360 buildable slots on a 14x14 board.
+them**, side by side. That is ~370 buildable slots across roughly 200 tiles, and the exact numbers
+shift a little with the shape of your screen.
 
 It also gives you a choice of thickness. One brick in a tile is a thin, cheap wall; it still blocks
 the tile completely. Fill both slots and you have a proper thick wall with twice the stone to chew
