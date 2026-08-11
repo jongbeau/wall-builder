@@ -116,7 +116,7 @@ const CONFIG = {
     slotsPerTile: 2,          // each tile holds two half-tile bricks
     uw: 100, uh: 53, zh: 15,   // starting point; fitBoard() resizes these to the rect
     maxHeight: 4,
-    keepPlan: 4,              // the keep is 4 x 4 tiles, at the near edge
+    keepPlan: 3,              // the keep is 3 x 3 tiles, at the near edge
   },
 
   // How much of its cell a brick fills. Short of 1 so a mortar joint shows
@@ -262,7 +262,10 @@ const TILE_RATIO = 100 / 53;
   const r = CONFIG.board.rect;
   let uw = 100, zh = 15;
   for (let pass = 0; pass < 3; pass++) {
-    r.y0 = CONFIG.ui.hudH + 6 + CONFIG.board.maxHeight * zh;
+    // Only clearance for a full stack. The HUD floats over the board's far edge
+    // rather than reserving a band of its own — that band was ~10% of the
+    // screen sitting empty.
+    r.y0 = 6 + CONFIG.board.maxHeight * zh;
     uw = fitBoard(r, 196, TILE_RATIO).uw;
     zh = Math.max(8, Math.round(15 * uw / 100));
   }
@@ -316,12 +319,12 @@ for (let gx = 0; gx < GN; gx++) {
   }
 }
 
-// The keep sits against the near edge, centred, so the whole far side is open
-// approach and the player defends a frontage rather than a point.
+// The keep sits in the middle of the field, so every side is open approach and
+// the player defends a perimeter rather than a frontage. gx0 == gy0 puts it on
+// the screen's centre line; the offset puts its centre at half the board depth.
 const KEEP_N = CONFIG.board.keepPlan;
-const KEEP_V = DEPTH - (DEPTH % 2);              // deepest even sum, i.e. the near-centre tile
-const KEEP_GX0 = SHIFT + KEEP_V / 2 - (KEEP_N - 1);
-const KEEP_GY0 = SHIFT + KEEP_V / 2 - (KEEP_N - 1);
+const KEEP_GX0 = SHIFT + Math.max(0, Math.round((DEPTH / 2 - (KEEP_N - 1)) / 2));
+const KEEP_GY0 = KEEP_GX0;
 const KEEP_TILES = [];
 for (let kx = KEEP_GX0; kx < KEEP_GX0 + KEEP_N; kx++) {
   for (let ky = KEEP_GY0; ky < KEEP_GY0 + KEEP_N; ky++) KEEP_TILES.push([kx, ky]);
@@ -778,6 +781,7 @@ function resetGame() {
   Game.tool = "clay"; Game.buildCd = 0; Game.shake = 0;
   Game.banner = null; Game.nextSurge = CONFIG.spawn.surgeEvery;
   Game.spawnAcc = 0; Game.flash = 0; Game.flankOpen = false; Game.peek = false;
+  lastDenied = -1;
   flowDirty = true;
 }
 
@@ -846,7 +850,7 @@ function placeBrick(type, gx, gy, h = 0) {
   const def = BRICKS[type];
   const [sx, sy] = slotScreen(gx, gy, h, slotHeight(gx, gy, h));
   if (!canPlace(type, gx, gy, h)) return false;
-  if (Game.gold < def.cost) { denied(sx, sy, "No gold"); return false; }
+  if (Game.gold < def.cost) { denied(sx, sy - ZH * 1.5, "No gold"); return false; }
   slotStack(gx, gy, h).push(makeBrick(type));
   Game.gold -= def.cost;
   puff(sx, sy, 6, "#d9cdb4");
@@ -875,7 +879,7 @@ function repairTop(gx, gy, h = 0) {
   const b = st[st.length - 1];
   if (!b || b.hp >= b.maxHp) return false;
   const [sx, sy] = slotScreen(gx, gy, h, st.length);
-  if (Game.gold < CONFIG.economy.repairCost) { denied(sx, sy, "No gold"); return false; }
+  if (Game.gold < CONFIG.economy.repairCost) { denied(sx, sy - ZH * 1.5, "No gold"); return false; }
   Game.gold -= CONFIG.economy.repairCost;
   b.hp = Math.min(b.maxHp, b.hp + b.maxHp * CONFIG.economy.repairFrac);
   puff(sx, sy, 5, "#9fd8a0");
@@ -1008,11 +1012,22 @@ function burstBrick(gx, gy, h, level, b) {
   puff(x, y, 6, "#c9bda4");
   Game.shake = Math.min(9, Game.shake + 3.5);
 }
-function damageText(x, y, text, color) {
+function damageText(x, y, text, color, size) {
+  // Jittered so simultaneous hits on one target don't stack into a blob.
   addParticle({ kind: "text", x: x + rand(-7, 7), y: y + rand(-8, 8), depth: 99,
-    vx: rand(-10, 10), vy: rand(-46, -30), life: 0, max: 0.8, text, color });
+    vx: rand(-10, 10), vy: rand(-46, -30), life: 0, max: 0.8, text, color, size });
 }
-const denied = (x, y, text) => damageText(x, y, text, "#e07a6a");
+
+// A refusal has to be readable at a glance mid-siege, so it is much larger than
+// a damage number and hangs around longer. Rate-limited, because a held drag
+// over unaffordable ground would otherwise emit one every frame.
+let lastDenied = -1;
+function denied(x, y, text) {
+  if (Game.t - lastDenied < 0.4) return;
+  lastDenied = Game.t;
+  addParticle({ kind: "text", x, y, depth: 99, vx: 0, vy: -26,
+    life: 0, max: 1.2, text, color: "#ff9b86", size: 34 });
+}
 
 function updateParticles(dt) {
   for (let i = particles.length - 1; i >= 0; i--) {
@@ -1639,11 +1654,37 @@ function drawKeep() {
   // balustraded roof, ranks of windows, and a columned portico with a pediment
   // on the face turned toward the camera.
   const cx = isoX(KEEP_GX0, KEEP_GY0);
-  const baseY = isoY(KEEP_GX0 + KEEP_N - 1, KEEP_GY0 + KEEP_N - 1) + CELL_CORNERS[2][1];
-  const topY = isoY(KEEP_GX0, KEEP_GY0) + CELL_CORNERS[0][1];
-  const hw = CONFIG.board.keepPlan * UW / 2;
-  const midY = (topY + baseY) / 2;
-  const wallH = (baseY - topY) * 0.60;   // three storeys: the facade is the building
+  const plotBaseY = isoY(KEEP_GX0 + KEEP_N - 1, KEEP_GY0 + KEEP_N - 1) + CELL_CORNERS[2][1];
+  const plotTopY = isoY(KEEP_GX0, KEEP_GY0) + CELL_CORNERS[0][1];
+  const plotHW = CONFIG.board.keepPlan * UW / 2;
+  const midY = (plotTopY + plotBaseY) / 2;
+
+  // The building occupies well under its footprint, and the rest of the plot is
+  // drawn as grounds. That keeps the house modest on screen without shrinking
+  // the blocked area — a smaller footprint would cheapen the seal around it and
+  // move the balance, and bare ground you cannot build on reads as a bug.
+  const PLOT = 0.58;
+  const hw = plotHW * PLOT;
+  const topY = midY + (plotTopY - midY) * PLOT;
+  const baseY = midY + (plotBaseY - midY) * PLOT;
+  const wallH = (baseY - topY) * 0.62;   // three storeys: the facade is the building
+
+  // Grounds: lawn, a gravel apron, and a hedge along the plot edge.
+  const plot = (k, fill) => {
+    ctx.beginPath();
+    ctx.moveTo(cx, midY + (plotTopY - midY) * k);
+    ctx.lineTo(cx + plotHW * k, midY);
+    ctx.lineTo(cx, midY + (plotBaseY - midY) * k);
+    ctx.lineTo(cx - plotHW * k, midY);
+    ctx.closePath();
+    ctx.fillStyle = fill; ctx.fill();
+  };
+  plot(1.0, "#5b6a3c");
+  plot(0.94, "#657544");
+  plot(0.80, "#cdc3a8");
+  plot(0.72, "#6d7d49");
+  ctx.strokeStyle = "rgba(40,52,26,0.5)"; ctx.lineWidth = 1.5;
+  plot(0.94, "rgba(0,0,0,0)"); ctx.stroke();
 
   const STONE_LIT = "#f4f2ec", STONE = "#e6e2d8", STONE_DARK = "#cdc8bb";
   const SHADOW = "rgba(70,64,54,0.30)";
@@ -2108,7 +2149,7 @@ function drawParticle(p) {
   const k = 1 - p.life / p.max;
   if (p.kind === "text") {
     ctx.globalAlpha = clamp(k * 1.6, 0, 1);
-    ctx.font = "700 17px system-ui, sans-serif";
+    ctx.font = `700 ${p.size || 17}px system-ui, sans-serif`;
     ctx.textAlign = "center"; ctx.textBaseline = "middle";
     ctx.fillStyle = "rgba(0,0,0,0.5)"; ctx.fillText(p.text, p.x + 1.5, p.y + 1.5);
     ctx.fillStyle = p.color; ctx.fillText(p.text, p.x, p.y);
@@ -2138,7 +2179,7 @@ function drawScene(alpha) {
     if (heightAt(gx, gy)) drawables.push({ d: cellDepth(gx, gy), k: 0, gx, gy });
   }
   // Keep sits on the near corner; give it that corner's depth.
-  drawables.push({ d: cellDepth(KEEP_GX0, KEEP_GY0), k: 3 });
+  drawables.push({ d: cellDepth(KEEP_GX0, KEEP_GY0) + (KEEP_N - 1), k: 3 });
   for (const inv of invaders) {
     if (inv.dead) continue;
     const d = depthOf(lerp(inv.pgx, inv.gx, alpha), lerp(inv.pgy, inv.gy, alpha));
@@ -2231,48 +2272,72 @@ function drawBuildHints() {
 const PAUSE_BTN = { x: 1004, y: 62, w: 122, h: 84 };
 const PEEK_BTN  = { x: 1004, y: 154, w: 122, h: 84 };
 
+// A compact pill floating over the board's far edge, rather than a full-width
+// bar. The bar cost ~10% of the screen height in reserved space; the far edge
+// is open approach ground, so the readout can simply sit on it.
 function drawHud() {
-  ctx.fillStyle = "rgba(10,12,18,0.55)";
-  ctx.fillRect(0, 0, W, CONFIG.ui.hudH);
-  ctx.fillStyle = "rgba(255,255,255,0.07)";
-  ctx.fillRect(0, CONFIG.ui.hudH - 2, W, 2);
+  const h = 40, y = 10, padX = 13, gap = 18;
+  const cy = y + h / 2;
+
+  const goldTxt = String(Math.floor(Game.gold));
+  const timeTxt = fmtTime(Game.t);
+  const killTxt = String(Game.stopped);
+  const barW = 96, barH = 13;
+
+  const bigFont = "700 23px system-ui, sans-serif";
+  const smallFont = "600 15px system-ui, sans-serif";
+  const measure = (f, t) => { ctx.font = f; return ctx.measureText(t).width; };
+
+  const wGold = 20 + 6 + measure(bigFont, goldTxt);
+  const wKeep = barW;
+  const wTime = measure(bigFont, timeTxt) + 6 + measure(smallFont, "held");
+  const wKill = measure(bigFont, killTxt) + 6 + measure(smallFont, "stopped");
+  const total = padX * 2 + wGold + wKeep + wTime + wKill + gap * 3;
+
+  ctx.fillStyle = "rgba(10,12,18,0.62)";
+  roundRect(ctx, 12, y, total, h, h / 2); ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,0.10)"; ctx.lineWidth = 1;
+  roundRect(ctx, 12, y, total, h, h / 2); ctx.stroke();
 
   ctx.textBaseline = "middle";
-  const cy = CONFIG.ui.hudH / 2;
+  ctx.textAlign = "left";
+  let x = 12 + padX;
 
+  // Gold.
   ctx.fillStyle = "#f2cf6b";
-  ctx.beginPath(); ctx.arc(28, cy, 12, 0, 6.284); ctx.fill();
+  ctx.beginPath(); ctx.arc(x + 10, cy, 9, 0, 6.284); ctx.fill();
   ctx.fillStyle = "#b8952f";
-  ctx.beginPath(); ctx.arc(28, cy, 6, 0, 6.284); ctx.fill();
-  ctx.font = "700 30px system-ui, sans-serif";
-  ctx.textAlign = "left"; ctx.fillStyle = "#f6e2a8";
-  ctx.fillText(String(Math.floor(Game.gold)), 48, cy + 1);
+  ctx.beginPath(); ctx.arc(x + 10, cy, 4.5, 0, 6.284); ctx.fill();
+  ctx.font = bigFont; ctx.fillStyle = "#f6e2a8";
+  ctx.fillText(goldTxt, x + 26, cy + 1);
+  x += wGold + gap;
 
-  const bx = 178, bw = 210, bh = 20;
-  ctx.font = "600 17px system-ui, sans-serif";
-  ctx.fillStyle = "#9aa2b0"; ctx.fillText("KEEP", bx, cy - 13);
-  ctx.fillStyle = "rgba(0,0,0,0.5)";
-  roundRect(ctx, bx, cy - 2, bw, bh, 5); ctx.fill();
+  // Keep integrity.
   const f = clamp(Game.integrity / CONFIG.keep.integrity, 0, 1);
+  ctx.fillStyle = "rgba(0,0,0,0.5)";
+  roundRect(ctx, x, cy - barH / 2, barW, barH, barH / 2); ctx.fill();
   if (f > 0.005) {
     ctx.fillStyle = f > 0.5 ? "#5fa9d8" : f > 0.25 ? "#e0bb4c" : "#d9614c";
-    roundRect(ctx, bx, cy - 2, Math.max(bh, bw * f), bh, 5); ctx.fill();
+    roundRect(ctx, x, cy - barH / 2, Math.max(barH, barW * f), barH, barH / 2); ctx.fill();
   }
-  ctx.fillStyle = "#e9eef5"; ctx.font = "700 15px system-ui, sans-serif";
-  ctx.textAlign = "right"; ctx.fillText(Math.ceil(Game.integrity) + "%", bx + bw - 8, cy + 8);
-
+  ctx.font = "700 11px system-ui, sans-serif";
+  ctx.fillStyle = "#dfe6ef";
+  ctx.textAlign = "center";
+  ctx.fillText(Math.ceil(Game.integrity) + "%", x + barW / 2, cy + 1);
   ctx.textAlign = "left";
-  let x = 434;
+  x += wKeep + gap;
+
+  // Time and kills.
   const stat = (value, label) => {
-    ctx.font = "700 28px system-ui, sans-serif"; ctx.fillStyle = "#e9eef5";
+    ctx.font = bigFont; ctx.fillStyle = "#e9eef5";
     ctx.fillText(value, x, cy + 1);
-    x += ctx.measureText(value).width + 9;
-    ctx.font = "600 20px system-ui, sans-serif"; ctx.fillStyle = "#9aa2b0";
-    ctx.fillText(label, x, cy + 3);
-    x += ctx.measureText(label).width + 30;
+    x += ctx.measureText(value).width + 6;
+    ctx.font = smallFont; ctx.fillStyle = "#98a1af";
+    ctx.fillText(label, x, cy + 2);
+    x += ctx.measureText(label).width + gap;
   };
-  stat(fmtTime(Game.t), "survived");
-  stat(String(Game.stopped), "stopped");
+  stat(timeTxt, "held");
+  stat(killTxt, "stopped");
 
   drawSideButtons();
 }
@@ -2317,7 +2382,7 @@ function drawSideButtons() {
 function toolbarLayout() {
   const n = TOOLS.length;
   const total = n * CONFIG.ui.btnH + (n - 1) * CONFIG.ui.btnGap;
-  const y0 = CONFIG.ui.hudH + (H - CONFIG.ui.hudH - total) / 2;
+  const y0 = 12 + (H - 24 - total) / 2;
   return TOOLS.map((t, i) => ({
     tool: t, x: CONFIG.ui.barX, w: CONFIG.ui.barW,
     y: y0 + i * (CONFIG.ui.btnH + CONFIG.ui.btnGap), h: CONFIG.ui.btnH,

@@ -33,8 +33,9 @@ Two versions live here:
 happens, your rotation lock is on).
 
 The world is **shaped to your screen** rather than letterboxed into a fixed 16:9 box, so a wide phone
-gets a wider board instead of black bars — and the tiles grow to match. On a 2:1 phone that is ~40
-CSS px between tile centres, against ~30 on a 16:9 one.
+gets a wider board instead of black bars — and the tiles grow to match. The board also runs the full
+height: there is no sky and no HUD bar, just a readout floating over the field's far edge. On a 2:1
+phone that works out at ~43 CSS px between tile centres, against ~33 on a 16:9 one.
 
 | | Touch | Desktop |
 |---|---|---|
@@ -152,9 +153,11 @@ The dials that matter most:
 - `CONFIG.board.uw` / `uh` / `zh` — starting tile geometry only. `fitBoard()` overrides them at load
   with the **largest** tile that still yields ~200 tiles in the rectangle, so a wider screen spends
   its extra room on bigger tiles rather than more of them.
-- `CONFIG.board.keepPlan` — the keep's footprint in plan units. A difficulty dial in disguise: a
-  bigger keep has more tiles touching it, which multiplies both the wall you must maintain and the
-  number of attackers that can reach it at once. Change it and `economy.income` has to follow.
+- `CONFIG.board.keepPlan` — the keep's footprint in tiles. A difficulty dial in disguise: a bigger
+  keep has more tiles touching it, which multiplies both the wall you must maintain and the number of
+  attackers that can reach it at once. Change it and `economy.income` has to follow. The building
+  itself is drawn at a fraction of this (`PLOT` in `drawKeep`) with the remainder shown as grounds,
+  so its size on screen can be tuned without moving the balance.
 - `CONFIG.unitScale` / `fxScale` — how small invaders and debris are drawn. Invaders are drawn at
   nominal proportions and scaled as a whole, so line weights shrink with them. Hitboxes keep a
   world-space floor so arrows still connect.
@@ -184,8 +187,8 @@ __game.computeFlow()    // the raw pathfinding field
 
 - Verified in a desktop browser at phone-landscape sizes (667×375, 844×390, 956×440) with synthesized
   pointer events, and played on a real phone. Sustained framerate across devices is still unconfirmed.
-  Tile spacing is 30-40 CSS px depending on screen shape — under the 44 px touch guideline on narrow
-  phones, but close to it on wide ones.
+  Tile spacing is 33-43 CSS px depending on screen shape — essentially at the 44 px touch guideline on
+  a wide phone, a little under it on a narrow one.
 - The world's aspect is measured once at load. Rotating a phone shows the landscape prompt, and a
   desktop window resized to a very different shape will letterbox rather than rebuild the board,
   because rebuilding the grid mid-game would throw away the wall you built.
