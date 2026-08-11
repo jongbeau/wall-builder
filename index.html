@@ -804,7 +804,7 @@ function brickPath(c, cx, topCy, orient) {
 const Sound = {
   ctx: null, master: null, musicBus: null, sfxBus: null,
   on: true, started: false, mode: "calm", modeUntil: 0,
-  nextBeatAt: 0, beat: 0, lastSfx: 0, voices: 0,
+  nextBeatAt: 0, step: 0, lastSfx: 0, voices: 0,
 
   load() {
     try { this.on = localStorage.getItem("wallbuilder.sound") !== "off"; } catch (e) {}
@@ -848,7 +848,7 @@ const Sound = {
 
     this.started = true;
     this.nextBeatAt = this.ctx.currentTime + 0.1;
-    this.beat = 0;
+    this.step = 0;
     this.resume();
   },
 
@@ -866,7 +866,7 @@ const Sound = {
   // --- voices ---------------------------------------------------------------
 
   tone(at, freq, dur, o) {
-    if (this.voices > 24) return;
+    if (this.voices > 40) return;
     o = o || {};
     const c = this.ctx, g = c.createGain(), f = c.createBiquadFilter();
     const osc = c.createOscillator(), osc2 = c.createOscillator();
@@ -951,52 +951,136 @@ const Sound = {
   surge() { if (this.started) { this.mode = "intense"; this.modeUntil = Game.t + 14; } },
 
   // --- the march ------------------------------------------------------------
+  //
+  // Written as a Sousa-style march rather than a generic loop, because that is
+  // what actually reads as patriotic: dotted rhythms, an oom-pah bass with the
+  // tuba on one and three and afterbeat chords on two and four, a bugle-call
+  // melody built from triad intervals, and — the real signature of the genre —
+  // a piccolo descant riding over the trio.
+  //
+  // Sixteenth-note resolution, because the dotted long-short figure is the
+  // whole martial character and eighths cannot express it.
 
-  // Scheduled ahead of time against the audio clock; scheduling on frames would
-  // put audible jitter in the beat.
+  // Sixteen bars: an eight-bar strain in C, then the trio in F, as marches go.
+  CHORDS: [0, 0, 5, 0, 7, 7, 0, 0,   5, 5, 10, 5, 0, 0, 5, 5],
+  KEY:    [0, 0, 0, 0, 0, 0, 0, 0,   5, 5, 5,  5, 5, 5, 5, 5],
+
+  // [degree above the section's key, start in 16ths, length in 16ths]
+  STRAIN: [
+    [[0,0,6],[4,6,2],[7,8,4],[7,12,4]],
+    [[12,0,6],[11,6,2],[9,8,4],[7,12,4]],
+    [[5,0,6],[7,6,2],[9,8,8]],
+    [[7,0,4],[4,4,4],[0,8,8]],
+    [[2,0,6],[4,6,2],[7,8,4],[11,12,4]],
+    [[14,0,6],[12,6,2],[11,8,8]],
+    [[12,0,4],[11,4,4],[9,8,4],[7,12,4]],
+    [[0,0,10],[7,10,3],[12,13,3]],
+  ],
+  TRIO: [
+    [[0,0,6],[2,6,2],[4,8,8]],
+    [[5,0,6],[4,6,2],[2,8,8]],
+    [[7,0,6],[5,6,2],[4,8,4],[2,12,4]],
+    [[0,0,14]],
+    [[4,0,6],[5,6,2],[7,8,8]],
+    [[9,0,6],[7,6,2],[5,8,8]],
+    [[4,0,4],[2,4,4],[0,8,4],[-1,12,4]],
+    [[0,0,14]],
+  ],
+  // The piccolo obbligato, in sixteenths over the back half of the trio.
+  DESCANT: [12, 16, 19, 16, 21, 19, 16, 12, 14, 17, 21, 17, 19, 16, 12, 7],
+
+  hz(n) { return 261.63 * Math.pow(2, n / 12); },
+
+  // Brass: detuned saws through a lowpass, plus a breath of noise at the attack.
+  // The chiff is what stops it sounding like a synth pad.
+  brass(at, freq, dur, gain, bright) {
+    this.tone(at, freq, dur, {
+      type: "sawtooth", gain, cutoff: bright || 2400, q: 1.4, detune: 11, attack: 0.014,
+    });
+    this.hit(at, 0.03, { filter: "bandpass", freq: freq * 2.5, q: 2, gain: gain * 0.5 });
+  },
+
   update() {
     if (!this.started || !this.on || !this.ctx) return;
-    if (Game.state !== "playing") { this.beat = 0; this.nextBeatAt = this.ctx.currentTime + 0.1; return; }
+    if (Game.state !== "playing") { this.step = 0; this.nextBeatAt = this.ctx.currentTime + 0.1; return; }
     if (this.mode === "intense" && Game.t > this.modeUntil) this.mode = "calm";
 
     const intense = this.mode === "intense";
-    const spb = 60 / (intense ? 152 : 112) / 2;          // eighth notes
-    const horizon = this.ctx.currentTime + 0.25;
+    const six = 60 / (intense ? 148 : 112) / 4;
+    const horizon = this.ctx.currentTime + 0.3;
     let guard = 0;
-    while (this.nextBeatAt < horizon && guard++ < 32) {
-      this.scheduleBeat(this.nextBeatAt, this.beat, intense);
-      this.nextBeatAt += spb;
-      this.beat++;
+    while (this.nextBeatAt < horizon && guard++ < 48) {
+      this.scheduleStep(this.nextBeatAt, this.step || 0, intense, six);
+      this.nextBeatAt += six;
+      this.step = (this.step || 0) + 1;
     }
   },
 
-  scheduleBeat(at, i, intense) {
-    const N = (n) => 55 * Math.pow(2, n / 12);           // semitones above A1
-    const bar = Math.floor(i / 8) % 4, e = i % 8;        // eighths within a 4/4 bar
+  scheduleStep(at, s, intense, six) {
+    const bar = Math.floor(s / 16) % 16, t = s % 16;
+    const root = this.CHORDS[bar], key = this.KEY[bar];
+    const trio = bar >= 8;
+    const B = (n) => this.hz(n);
 
-    // A plain I-IV-V-I turn, the backbone of every march ever written.
-    const roots = intense ? [15, 13, 20, 18] : [15, 20, 22, 15];   // C, F, G, C
-    const root = roots[bar];
+    if (intense) return this.scheduleIntense(at, s, root, six);
 
-    if (e % 2 === 0) {                                   // oom-pah bass
-      const n = (e === 0 || e === 4) ? root : root + 7;
-      this.tone(at, N(n - 12), 0.2, { type: "square", gain: 0.16, cutoff: 700 });
+    // Tuba on one and three; the whole march sits on this.
+    if (t === 0 || t === 8) {
+      this.tone(at, B(root - 24), six * 3.4, { type: "square", gain: 0.2, cutoff: 380 });
+      this.thump(at, 92, 44, 0.16, 0.26, this.musicBus);            // bass drum
     }
-    if (e === 2 || e === 6 || (intense && e % 2 === 1)) {  // snare
-      this.hit(at, intense ? 0.09 : 0.12, { freq: 1800, q: 0.9, gain: intense ? 0.2 : 0.15 });
+    // Afterbeat chords on two and four — the "pah".
+    if (t === 4 || t === 12) {
+      for (const iv of [0, 4, 7]) {
+        this.tone(at, B(root - 12 + iv), six * 1.5, { type: "sawtooth", gain: 0.055, cutoff: 1500 });
+      }
     }
-    if (intense && e % 4 === 0) this.thump(at, 130, 42, 0.22, 0.34, this.musicBus);
 
-    // Brass on the chord tones: fanfare shape when calm, driving stabs when not.
-    const calmLine = [0, 4, 7, 4, 12, 7, 4, 0];
-    const hotLine  = [0, 0, 3, 0, 7, 3, 0, -5];
-    const step = (intense ? hotLine : calmLine)[e];
-    if (intense || e % 2 === 0 || e === 5) {
-      this.tone(at, N(root + step), intense ? 0.16 : 0.26, {
-        type: "sawtooth", gain: intense ? 0.15 : 0.13,
-        cutoff: intense ? 2600 : 1900, detune: 10,
+    // March snare: a flam on the downbeat, then the long-short figure.
+    if (t === 0) { this.hit(at - 0.02, 0.05, { filter: "highpass", freq: 1600, gain: 0.09 });
+                   this.hit(at, 0.1, { filter: "highpass", freq: 1500, gain: 0.2 }); }
+    else if (t === 6 || t === 10 || t === 14) this.hit(at, 0.07, { filter: "highpass", freq: 1600, gain: 0.13 });
+    else if (t === 8) this.hit(at, 0.09, { filter: "highpass", freq: 1500, gain: 0.16 });
+    // Roll into each new eight-bar strain.
+    if ((bar % 8) === 7 && t >= 8) this.hit(at, 0.05, { filter: "highpass", freq: 1800, gain: 0.1 });
+    // Cymbal where the strain turns over.
+    if (t === 0 && (bar === 0 || bar === 8)) {
+      this.hit(at, 0.9, { filter: "highpass", freq: 4200, gain: 0.14 });
+    }
+
+    // Melody: dotted long-short throughout, which is the martial signature.
+    const line = (trio ? this.TRIO : this.STRAIN)[bar % 8];
+    for (const [deg, st, len] of line) {
+      if (st !== t) continue;
+      this.brass(at, B(key + deg), six * len * 0.92, 0.14, 2300);
+      this.brass(at, B(key + deg - 12), six * len * 0.92, 0.05, 1500);   // octave underneath
+    }
+
+    // The piccolo, over the second half of the trio.
+    if (bar >= 12) {
+      const n = this.DESCANT[t];
+      this.tone(at, B(key + n + 12), six * 0.85, {
+        type: "triangle", gain: 0.075, cutoff: 6000, detune: 4, attack: 0.006,
       });
-      if (!intense && e === 0) this.tone(at, N(root + step + 7), 0.3, { gain: 0.07, cutoff: 1700 });
+    }
+  },
+
+  // Surge: same band, darker key, doubled snare, and no piccolo.
+  scheduleIntense(at, s, root, six) {
+    const t = s % 16;
+    const B = (n) => this.hz(n);
+    const dark = [0, -2, -4, -5][Math.floor(s / 16) % 4];
+
+    if (t % 4 === 0) {
+      this.tone(at, B(dark - 24), six * 2.6, { type: "square", gain: 0.22, cutoff: 340 });
+      this.thump(at, 120, 40, 0.2, 0.34, this.musicBus);
+    }
+    if (t % 2 === 0) this.hit(at, 0.06, { filter: "highpass", freq: 1700, gain: 0.14 });
+    if (t === 0) this.hit(at, 0.7, { filter: "highpass", freq: 3800, gain: 0.12 });
+
+    // Stabbed minor triads, urgent rather than tuneful.
+    if (t % 4 === 0 || t === 6 || t === 14) {
+      for (const iv of [0, 3, 7]) this.brass(at, B(dark + iv), six * 1.6, 0.085, 2700);
     }
   },
 };
@@ -2733,11 +2817,14 @@ function drawToolbar() {
     const ix = b.x + 34, iy = b.y + b.h / 2;
     if (BRICKS[id]) {
       // Scaled to a readable icon regardless of how small board tiles get.
-      const s = 46 / SPRITE_BODY;
+      // The archer's figure lives outside the sprite now — it has to be drawn
+      // here too, or the icon is just the bare platform he stands on.
+      const s = 40 / SPRITE_BODY;
       ctx.save();
-      ctx.translate(ix, iy + SPRITE_H * s * 0.3);
+      ctx.translate(ix, iy + SPRITE_BODY * s * 0.45);
       ctx.scale(s, s);
       Atlas.draw(ctx, id, 0, 1, 0, -SPRITE_W / 2, -SPRITE_CY - ZH);
+      if (id === "archer") drawArcherFigure(0, -ZH, false, 1.25);
       ctx.restore();
     } else if (id === "repair") {
       ctx.strokeStyle = "#8fe08a"; ctx.lineWidth = 6; ctx.lineCap = "round";

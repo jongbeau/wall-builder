@@ -88,9 +88,21 @@ one. Gold is the only limit. This works the same on touch and mouse.
 
 ## Sound
 
-A patriotic march plays under the siege, and switches to something faster and darker while a surge
-is on. Bricks give way with a crack and rubble; invaders go down with a dry impact; anything that
-reaches the keep lands a low boom.
+A Sousa-style march plays under the siege — written as a march rather than a loop, because that is
+what actually reads as patriotic:
+
+- **Dotted rhythms** throughout. The long-short figure is the martial signature, and it needs
+  sixteenth-note resolution to exist at all.
+- **Oom-pah bass**: tuba on one and three, afterbeat chords on two and four.
+- **Bugle-call melody** built from triad intervals, doubled an octave down.
+- **March snare** with a flam on the downbeat and a roll into each new strain; bass drum and a
+  cymbal where the strain turns over.
+- **Sixteen-bar form**: an eight-bar strain in C, then a trio in F — and over the back half of the
+  trio, a **piccolo descant** in running sixteenths, which is the sound everyone actually recognises.
+
+A surge swaps it for the same band playing something darker and faster: minor stabs, snare on every
+eighth, no piccolo. Bricks give way with a crack and rubble; invaders go down with a dry impact;
+anything that reaches the keep lands a low boom.
 
 All of it is **synthesised at runtime** with the Web Audio API — no audio files, because the game is
 a single self-contained page. The march is scheduled against the audio clock rather than the frame
@@ -245,8 +257,9 @@ __game.computeFlow()    // the raw pathfinding field
 - The ring-switch override is written against `navigator.audioSession` and feature-detected, but the
   browser used for testing does not implement that API, so **only a real iPhone can confirm music
   plays with the switch on.** Everything else about the audio was verified by measuring the output:
-  the march reaches RMS 0.053, effects layer to 0.17, the surge mix is louder than the calm one, and
-  muting drops output to exactly zero.
+  the march is audible in both strain and trio, the trio's back half schedules 64 piccolo notes
+  across four bars against zero elsewhere, effects layer over the music, the surge mix is louder
+  than the calm one, and muting drops output to exactly zero.
 - The world's aspect is measured once at load. Rotating a phone shows the landscape prompt, and a
   desktop window resized to a very different shape will letterbox rather than rebuild the board,
   because rebuilding the grid mid-game would throw away the wall you built.
