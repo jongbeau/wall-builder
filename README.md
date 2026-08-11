@@ -32,10 +32,24 @@ Two versions live here:
 **Landscape only** — the kingdom needs the width. On a phone, turn the device sideways (if nothing
 happens, your rotation lock is on).
 
-The world is **shaped to your screen** rather than letterboxed into a fixed 16:9 box, so a wide phone
-gets a wider board instead of black bars — and the tiles grow to match. The board also runs the full
-height: there is no sky and no HUD bar, just a readout floating over the field's far edge. On a 2:1
-phone that works out at ~43 CSS px between tile centres, against ~33 on a 16:9 one.
+The world is **shaped to your screen** rather than letterboxed into a fixed 16:9 box, so nothing is
+wasted on black bars and the tiles grow to fill whatever room there is. The board runs the full
+height too: there is no sky and no HUD bar, just a readout and two buttons floating over the field's
+far edge.
+
+Measured on the usable area each phone actually gives a landscape web page, after the Dynamic Island
+and home indicator take their cut:
+
+| Phone | Usable box | Tiles | Tile spacing | Wasted |
+|---|---|---|---|---|
+| iPhone 13 mini | 712×354 | 210 | 32.6 px | none |
+| iPhone SE | 667×375 | 199 | 33.0 px | none |
+| iPhone 17 | 756×381 | 210 | 34.4 px | none |
+| iPhone 17 Pro Max | 838×419 | 200 | 43.2 px | none |
+
+Every phone gets roughly the same number of tiles; a bigger screen buys bigger tiles rather than
+more of them, so the game plays the same everywhere. Palette buttons stay at or near the 44 px touch
+target throughout (43.3 px at the very smallest).
 
 | | Touch | Desktop |
 |---|---|---|

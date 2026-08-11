@@ -2342,38 +2342,39 @@ function drawHud() {
   drawSideButtons();
 }
 
-function sideButton(r, active, label) {
-  ctx.fillStyle = active ? "rgba(95,169,216,0.26)" : "rgba(10,12,18,0.60)";
-  roundRect(ctx, r.x, r.y, r.w, r.h, 10); ctx.fill();
-  ctx.strokeStyle = active ? "#7fc4ea" : "rgba(255,255,255,0.16)";
+function topButton(r, active, label) {
+  ctx.fillStyle = active ? "rgba(95,169,216,0.30)" : "rgba(10,12,18,0.62)";
+  roundRect(ctx, r.x, r.y, r.w, r.h, 12); ctx.fill();
+  ctx.strokeStyle = active ? "#7fc4ea" : "rgba(255,255,255,0.14)";
   ctx.lineWidth = active ? 3 : 1.5;
-  roundRect(ctx, r.x, r.y, r.w, r.h, 10); ctx.stroke();
+  roundRect(ctx, r.x, r.y, r.w, r.h, 12); ctx.stroke();
   ctx.fillStyle = active ? "#cfe9f7" : "#c3c9d4";
-  ctx.font = "700 18px system-ui, sans-serif";
+  ctx.font = "700 17px system-ui, sans-serif";
   ctx.textAlign = "center"; ctx.textBaseline = "middle";
-  ctx.fillText(label, r.x + r.w / 2, r.y + r.h - 18);
+  ctx.fillText(label, r.x + r.w / 2, r.y + r.h - 17);
 }
 
 function drawSideButtons() {
-  const p = PAUSE_BTN, cxp = p.x + p.w / 2, cyp = p.y + 30;
-  sideButton(p, Game.state === "paused", Game.state === "paused" ? "RESUME" : "PAUSE");
-  ctx.fillStyle = Game.state === "paused" ? "#cfe9f7" : "#e9eef5";
-  if (Game.state === "paused") {
+  const p = PAUSE_BTN, cxp = p.x + p.w / 2, cyp = p.y + p.h * 0.42;
+  const paused = Game.state === "paused";
+  topButton(p, paused, paused ? "RESUME" : "PAUSE");
+  ctx.fillStyle = paused ? "#cfe9f7" : "#e9eef5";
+  if (paused) {
     ctx.beginPath();
-    ctx.moveTo(cxp - 9, cyp - 12); ctx.lineTo(cxp + 12, cyp); ctx.lineTo(cxp - 9, cyp + 12);
+    ctx.moveTo(cxp - 10, cyp - 14); ctx.lineTo(cxp + 14, cyp); ctx.lineTo(cxp - 10, cyp + 14);
     ctx.closePath(); ctx.fill();
   } else {
-    ctx.fillRect(cxp - 11, cyp - 12, 7, 24);
-    ctx.fillRect(cxp + 4, cyp - 12, 7, 24);
+    ctx.fillRect(cxp - 12, cyp - 14, 8, 28);
+    ctx.fillRect(cxp + 4, cyp - 14, 8, 28);
   }
 
-  const k = PEEK_BTN, cxk = k.x + k.w / 2, cyk = k.y + 30;
-  sideButton(k, Game.peek, "PEEK");
+  const k = PEEK_BTN, cxk = k.x + k.w / 2, cyk = k.y + k.h * 0.42;
+  topButton(k, Game.peek, "PEEK");
   ctx.strokeStyle = Game.peek ? "#cfe9f7" : "#c3c9d4";
-  ctx.lineWidth = 2.4;
-  ctx.beginPath(); ctx.ellipse(cxk, cyk, 15, 9.5, 0, 0, 6.284); ctx.stroke();
+  ctx.lineWidth = 2.6;
+  ctx.beginPath(); ctx.ellipse(cxk, cyk, 17, 10.5, 0, 0, 6.284); ctx.stroke();
   ctx.fillStyle = Game.peek ? "#cfe9f7" : "#c3c9d4";
-  ctx.beginPath(); ctx.arc(cxk, cyk, 5, 0, 6.284); ctx.fill();
+  ctx.beginPath(); ctx.arc(cxk, cyk, 5.5, 0, 6.284); ctx.fill();
 }
 
 // The palette runs down the right edge: isometric is starved of vertical room
