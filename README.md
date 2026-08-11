@@ -54,7 +54,15 @@ target throughout (43.3 px at the very smallest, 51 px on a Pro Max).
 The proportions are measured at load. A phone is normally held in portrait, so the page usually
 loads that way and measures the screen stood up — which is the wrong shape. When you then rotate,
 the game reloads once with the right measurement. It can only do that before a game starts, so
-nothing is ever lost, and rotating mid-siege just pauses as usual.
+nothing is ever lost, and rotating mid-siege just pauses as usual. Consecutive reloads are capped in
+case the measurement wobbles, and the cap resets as soon as the world fits.
+
+Archer posts face away from the keep, since that is where their arrows go. The figure is drawn live
+rather than baked into the sprite so it can be mirrored per tile.
+
+One thing worth knowing about pointing: the pick follows what you can **see**. Clicking the raised
+face of a wall targets that wall, not the ground it hides — about 9% of the board once a full-height
+ring is up. The highlighted diamond always shows the tile you will actually build on.
 
 | | Touch | Desktop |
 |---|---|---|

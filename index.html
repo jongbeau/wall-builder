@@ -424,13 +424,24 @@ function refitWorldIfNeeded() {
 
   const box = availableBox();
   const want = clamp(H * (box.w / Math.max(1, box.h)), 1280, 1920);
-  if (Math.abs(want - W) / W < 0.05) return;      // close enough; don't churn
+  const KEY = "wallbuilder.refits";
 
-  try {
-    const stamp = String(Math.round(want));
-    if (sessionStorage.getItem("wallbuilder.refit") === stamp) return;
-    sessionStorage.setItem("wallbuilder.refit", stamp);
-  } catch (e) { /* private mode — the 5% test already rules out a loop */ }
+  if (Math.abs(want - W) / W < 0.05) {
+    // The world fits. Clear the counter so a later portrait load can refit
+    // again — the first version remembered the width it had corrected to and
+    // then refused to ever correct it again, which brought the bug straight
+    // back on the next visit.
+    try { sessionStorage.removeItem(KEY); } catch (e) {}
+    return;
+  }
+
+  // Cap consecutive reloads instead. The measurement can wobble if the address
+  // bar slides, and this stops that turning into a loop without ever disabling
+  // the fix outright.
+  let n = 0;
+  try { n = Number(sessionStorage.getItem(KEY)) || 0; } catch (e) {}
+  if (n >= 3) return;
+  try { sessionStorage.setItem(KEY, String(n + 1)); } catch (e) {}
   location.reload();
 }
 
@@ -698,58 +709,16 @@ const Atlas = {
     }
   },
 
-  // An archer standing on the brick, loosing arrows. Reads as a person at a
-  // glance, which a crenellated turret did not.
+  // Just the platform. The archer himself is drawn at render time so each post
+  // can face away from the keep, which the baked sprite could not do.
   paintArcher(c) {
     const [bx, by] = planToSprite(0, 0);
-    const u = UH * 0.055;                    // one unit of figure
-    const groundY = by + u * 1.2;
-
-    c.fillStyle = "rgba(0,0,0,0.22)";
-    c.beginPath(); c.ellipse(bx, groundY, u * 3.4, u * 1.5, 0, 0, 6.284); c.fill();
-
-    // Bow: an arc out in front, with the string drawn back.
-    c.strokeStyle = "#8a6636"; c.lineWidth = u * 0.62; c.lineCap = "round";
+    const w = UW * 0.19, d = UH * 0.17;
+    c.fillStyle = "rgba(120,110,92,0.45)";
     c.beginPath();
-    c.arc(bx + u * 2.6, groundY - u * 4.4, u * 3.1, -1.15, 1.15);
-    c.stroke();
-    c.strokeStyle = "rgba(240,238,230,0.85)"; c.lineWidth = u * 0.22;
-    c.beginPath();
-    c.moveTo(bx + u * 3.9, groundY - u * 7.2);
-    c.lineTo(bx + u * 1.2, groundY - u * 4.4);
-    c.lineTo(bx + u * 3.9, groundY - u * 1.6);
-    c.stroke();
-
-    // Nocked arrow.
-    c.strokeStyle = "#5a4632"; c.lineWidth = u * 0.34;
-    c.beginPath();
-    c.moveTo(bx + u * 0.7, groundY - u * 4.4);
-    c.lineTo(bx + u * 5.4, groundY - u * 4.4);
-    c.stroke();
-
-    // Legs, tunic, head.
-    c.strokeStyle = "#3f4a5c"; c.lineWidth = u * 0.8;
-    c.beginPath();
-    c.moveTo(bx - u * 1.1, groundY - u * 3.1); c.lineTo(bx - u * 1.7, groundY);
-    c.moveTo(bx - u * 0.1, groundY - u * 3.1); c.lineTo(bx + u * 0.9, groundY);
-    c.stroke();
-
-    c.fillStyle = "#4c6b8a";
-    roundRect(c, bx - u * 1.9, groundY - u * 6.6, u * 3.3, u * 3.8, u * 0.9);
-    c.fill();
-    c.fillStyle = "#6d90b3";
-    c.fillRect(bx - u * 1.9, groundY - u * 5.4, u * 3.3, u * 0.7);
-
-    // Drawing arm, reaching back to the string.
-    c.strokeStyle = "#d9b48c"; c.lineWidth = u * 0.72;
-    c.beginPath();
-    c.moveTo(bx + u * 0.2, groundY - u * 5.6); c.lineTo(bx + u * 1.3, groundY - u * 4.4);
-    c.stroke();
-
-    c.fillStyle = "#d9b48c";
-    c.beginPath(); c.arc(bx - u * 0.3, groundY - u * 7.6, u * 1.35, 0, 6.284); c.fill();
-    c.fillStyle = "#3f4a5c";                 // cap
-    c.beginPath(); c.arc(bx - u * 0.3, groundY - u * 7.9, u * 1.4, Math.PI, 0); c.fill();
+    c.moveTo(bx, by - d); c.lineTo(bx + w, by); c.lineTo(bx, by + d); c.lineTo(bx - w, by);
+    c.closePath(); c.fill();
+    c.strokeStyle = "rgba(240,236,225,0.35)"; c.lineWidth = 1.2; c.stroke();
   },
 
   draw(c, type, stage, variant, orient, x, y) {
@@ -759,6 +728,57 @@ const Atlas = {
       x, y, SPRITE_W, SPRITE_H);
   },
 };
+
+// An archer, standing at (cx, topCy) and facing left or right. Drawn live
+// rather than baked into the atlas so every post can turn away from the keep —
+// which is the direction its arrows actually go.
+function drawArcherFigure(cx, topCy, faceLeft, scale) {
+  const u = UH * 0.055 * (scale || 1);
+  ctx.save();
+  ctx.translate(cx, topCy);
+  if (faceLeft) ctx.scale(-1, 1);
+  const gy = u * 1.2;
+
+  ctx.fillStyle = "rgba(0,0,0,0.22)";
+  ctx.beginPath(); ctx.ellipse(0, gy, u * 3.2, u * 1.4, 0, 0, 6.284); ctx.fill();
+
+  // Bow, out in front, string drawn back.
+  ctx.strokeStyle = "#8a6636"; ctx.lineWidth = u * 0.62; ctx.lineCap = "round";
+  ctx.beginPath(); ctx.arc(u * 2.6, gy - u * 4.4, u * 3.1, -1.15, 1.15); ctx.stroke();
+  ctx.strokeStyle = "rgba(240,238,230,0.85)"; ctx.lineWidth = u * 0.22;
+  ctx.beginPath();
+  ctx.moveTo(u * 3.9, gy - u * 7.2);
+  ctx.lineTo(u * 1.2, gy - u * 4.4);
+  ctx.lineTo(u * 3.9, gy - u * 1.6);
+  ctx.stroke();
+
+  ctx.strokeStyle = "#5a4632"; ctx.lineWidth = u * 0.34;
+  ctx.beginPath(); ctx.moveTo(u * 0.7, gy - u * 4.4); ctx.lineTo(u * 5.4, gy - u * 4.4); ctx.stroke();
+
+  ctx.strokeStyle = "#3f4a5c"; ctx.lineWidth = u * 0.8;
+  ctx.beginPath();
+  ctx.moveTo(-u * 1.1, gy - u * 3.1); ctx.lineTo(-u * 1.7, gy);
+  ctx.moveTo(-u * 0.1, gy - u * 3.1); ctx.lineTo(u * 0.9, gy);
+  ctx.stroke();
+
+  ctx.fillStyle = "#4c6b8a";
+  roundRect(ctx, -u * 1.9, gy - u * 6.6, u * 3.3, u * 3.8, u * 0.9); ctx.fill();
+  ctx.fillStyle = "#6d90b3";
+  ctx.fillRect(-u * 1.9, gy - u * 5.4, u * 3.3, u * 0.7);
+
+  ctx.strokeStyle = "#d9b48c"; ctx.lineWidth = u * 0.72;
+  ctx.beginPath(); ctx.moveTo(u * 0.2, gy - u * 5.6); ctx.lineTo(u * 1.3, gy - u * 4.4); ctx.stroke();
+
+  ctx.fillStyle = "#d9b48c";
+  ctx.beginPath(); ctx.arc(-u * 0.3, gy - u * 7.6, u * 1.35, 0, 6.284); ctx.fill();
+  ctx.fillStyle = "#3f4a5c";
+  ctx.beginPath(); ctx.arc(-u * 0.3, gy - u * 7.9, u * 1.4, Math.PI, 0); ctx.fill();
+  ctx.restore();
+}
+
+// Which way is away from the keep, in screen terms. The keep sits on the centre
+// line, so a tile left of it shoots left and one right of it shoots right.
+const facesLeftFromKeep = (gx, gy) => planX(gx) < planY(gy);
 
 // A brick's outline in world space, for tinting overlays onto exactly the brick
 // rather than the whole tile it sits on.
@@ -1999,6 +2019,8 @@ function drawStack(gx, gy) {
       ctx.globalAlpha = 1;
       if (Game.peek) continue;   // skip the overlays; peek is for seeing the ground
 
+      if (b.type === "archer") drawArcherFigure(sx, topCy, facesLeftFromKeep(gx, gy));
+
       if (b.hitFlash > 0) {
         brickPath(ctx, sx, topCy, orient);
         ctx.fillStyle = `rgba(255,250,240,${b.hitFlash * 0.34})`;
@@ -2272,12 +2294,16 @@ function drawBuildHints() {
   const cx = isoX(gx, gy), cy = isoY(gx, gy);
   const tool = Game.tool;
 
-  // Faint outline of the whole tile, so which tile you are on stays obvious
-  // even though the brick only fills half of it.
+  // Outline the whole tile on the ground, clearly. A brick fills half a tile and
+  // its body is drawn above the ground it stands on, so without this the target
+  // reads as offset from the pointer — especially where a raised wall face
+  // covers the ground behind it and the pick follows what you can see.
   tileDiamond(cx, cy);
-  ctx.strokeStyle = "rgba(255,255,255,0.22)";
-  ctx.lineWidth = 1;
+  ctx.strokeStyle = "rgba(255,255,255,0.5)";
+  ctx.lineWidth = 2;
   ctx.stroke();
+  ctx.fillStyle = "rgba(255,255,255,0.07)";
+  ctx.fill();
 
   if (tool === "repair" || tool === "demolish") {
     const st = slotStack(gx, gy, h);
@@ -2301,6 +2327,7 @@ function drawBuildHints() {
   if (ok) {
     ctx.globalAlpha = 0.55;
     Atlas.draw(ctx, tool, 0, 0, orient, sx - SPRITE_W / 2, sy - (lvl + 1) * ZH - SPRITE_CY);
+    if (tool === "archer") drawArcherFigure(sx, sy - (lvl + 1) * ZH, facesLeftFromKeep(gx, gy));
     ctx.globalAlpha = 1;
   }
   brickPath(ctx, sx, sy - (ok ? lvl + 1 : lvl) * ZH, orient);
@@ -2636,8 +2663,10 @@ function toolAtPoint(wx, wy) {
 }
 const inRect = (wx, wy, r) => r && wx >= r.x && wx <= r.x + r.w && wy >= r.y && wy <= r.y + r.h;
 
-// The last slot this stroke touched, so a drag never re-applies to the same one.
+// The last slot this stroke touched, so a drag never re-applies to the same one,
+// and where it was last seen, so an interrupted drag does not paint a line back.
 let strokeSlot = null;
+let strokeAnchor = null;
 
 function applyTool(wx, wy, fromDrag) {
   if (Game.state !== "playing") return;
@@ -2661,13 +2690,19 @@ function applyTool(wx, wy, fromDrag) {
   if (acted && !fromDrag) Game.buildCd = CONFIG.economy.buildCooldown;
 }
 
-// Walk the line between two pointer samples. Touch move events coalesce, so a
-// quick swipe reports a handful of widely spaced points — applying only at
-// those would leave holes in the row.
+// Walk the line between two pointer samples. Move events coalesce, so a quick
+// swipe reports a handful of widely spaced points — applying only at those
+// would leave holes in the row.
+//
+// If the previous sample is missing or implausibly far away — the pointer left
+// the canvas mid-drag and came back, say — do not draw a line across the board
+// from wherever it used to be. Re-anchor and apply only at the new point.
 function applyAlong(x0, y0, x1, y1) {
   const step = Math.min(CELL_HW, CELL_HH) * 0.6;
-  const dist = Math.hypot(x1 - x0, y1 - y0);
-  const n = Math.max(1, Math.min(64, Math.ceil(dist / step)));
+  const jumped = x0 == null || Math.hypot(x1 - x0, y1 - y0) > Math.max(CELL_HW, CELL_HH) * 8;
+  if (jumped) { applyTool(x1, y1, true); return; }
+
+  const n = Math.max(1, Math.min(64, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / step)));
   for (let i = 1; i <= n; i++) {
     applyTool(lerp(x0, x1, i / n), lerp(y0, y1, i / n), true);
   }
@@ -2700,12 +2735,14 @@ function onDown(e) {
   // phone than simply placing under the finger, so both pointer types now
   // build on contact and paint on drag.
   strokeSlot = null;
+  strokeAnchor = { x: p.x, y: p.y };
   applyTool(p.x, p.y);
 }
 
 function onMove(e) {
   if (Pointer.id !== null && e.pointerId !== Pointer.id && Pointer.down) return;
-  const prevX = Pointer.x, prevY = Pointer.y;
+  const prevX = strokeAnchor ? strokeAnchor.x : null;
+  const prevY = strokeAnchor ? strokeAnchor.y : null;
   const p = Viewport.toWorld(e.clientX, e.clientY);
   Pointer.x = p.x; Pointer.y = p.y;
   Pointer.active = true;
@@ -2714,22 +2751,29 @@ function onMove(e) {
   e.preventDefault();
   if (p.x >= CONFIG.ui.barX - 12) return;   // dragging over the palette must not build
   applyAlong(prevX, prevY, p.x, p.y);
+  strokeAnchor = { x: p.x, y: p.y };
 }
 
 function onUp(e) {
   if (Pointer.id !== null && e.pointerId !== Pointer.id) return;
-  Pointer.down = false; Pointer.id = null; strokeSlot = null;
+  Pointer.down = false; Pointer.id = null; strokeSlot = null; strokeAnchor = null;
   if (e.pointerType && e.pointerType !== "mouse") Pointer.active = false;
 }
 // The OS steals touches for system gestures; without this a half-finished drag
 // would leave the pointer stuck down.
-function onCancel() { Pointer.down = false; Pointer.id = null; Pointer.active = false; strokeSlot = null; }
+function onCancel() {
+  Pointer.down = false; Pointer.id = null; Pointer.active = false;
+  strokeSlot = null; strokeAnchor = null;
+}
 
 canvas.addEventListener("pointerdown", onDown, { passive: false });
 canvas.addEventListener("pointermove", onMove, { passive: false });
 window.addEventListener("pointerup", onUp);
 window.addEventListener("pointercancel", onCancel);
-canvas.addEventListener("pointerleave", () => { if (!Pointer.coarse) Pointer.active = false; });
+canvas.addEventListener("pointerleave", () => {
+  strokeAnchor = null;                      // re-anchor if the pointer comes back
+  if (!Pointer.coarse) Pointer.active = false;
+});
 canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 
 window.addEventListener("keydown", (e) => {
