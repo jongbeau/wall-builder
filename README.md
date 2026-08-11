@@ -1,8 +1,8 @@
 # Wall Builder
 
 An isometric siege defence game, viewed from a distance. Two rival kingdoms send invaders swarming
-across your ground, and you hold them off by building a brick wall — laid out across a 14×14 plane,
-not just stacked up.
+across your ground, and you hold them off by building a brick wall — laid out across the field, not
+just stacked up.
 
 **▶ Play it: <https://jongbeau.github.io/wall-builder/>** — landscape, works on a phone.
 
@@ -24,7 +24,7 @@ Two versions live here:
 
 | File | What it is |
 |---|---|
-| `index.html` | The isometric game. Build across a 14×14 plane; invaders pathfind around your walls. |
+| `index.html` | The isometric game. Build across ~200 tiles; invaders pathfind around your walls. |
 | `classic.html` | The original side-view version. One lane, build upward only. Simpler and still fun. |
 
 ## Playing
@@ -34,21 +34,21 @@ happens, your rotation lock is on).
 
 | | Touch | Desktop |
 |---|---|---|
-| Lay a brick | touch, slide to aim, lift to place | click; drag to lay a run |
-| Pick which half of a tile | aim at that side of it | click that side of it |
+| Lay a brick | tap where you want it | click where you want it |
+| Lay a run quickly | drag across the ground | drag across the ground |
+| Pick which half of a tile | tap that side of it | click that side of it |
 | Choose a tool | palette on the right | palette, or `1`–`5` |
 | Repair / Raze | palette | `R` / right-click |
 | See through walls | PEEK button | `V` |
 | Pause | PAUSE button | `Space` |
 
-You aim at a **ground tile**, and bricks stack automatically — you never aim at a height. Which of
-the tile's two slots you get is decided by which side of the tile centre you aimed at, so a slip
-costs you the wrong half of the right tile rather than the wrong tile entirely.
+The brick goes exactly where you touch — no offset, no confirm step. You aim at a **ground tile**
+and bricks stack automatically, so you never aim at a height. Which of the tile's two slots you get
+is decided by which side of the tile centre you touched.
 
-**On touch, nothing is built until you lift your finger.** Tiles are small at this distance, so
-touching down only picks a target: it appears above your fingertip with a line back to where you're
-touching, you slide to correct it, and releasing commits. Sliding off the board cancels. A mouse is
-precise enough to place on click, so it does, and keeps drag-to-lay-a-run.
+**Drag to lay a run.** Every slot the drag crosses gets built, with no cooldown between them, and
+the path between move events is filled in — so a fast swipe leaves a solid line rather than a dotted
+one. Gold is the only limit. This works the same on touch and mouse.
 
 ## The idea
 
@@ -175,10 +175,9 @@ __game.computeFlow()    // the raw pathfinding field
 ## Known limits
 
 - Verified in a desktop browser at phone-landscape sizes (667×375 and 844×390) with synthesized
-  pointer events. **Not run on physical phone hardware** — feel and sustained framerate on a real
-  device are unconfirmed. That caveat matters more at this scale: tile spacing is 23.5 CSS px, well
-  under the 44 px touch guideline, and while commit-on-release is designed exactly for that, only a
-  real thumb will confirm it.
+  pointer events, and played on a real phone. Sustained framerate on a wide range of devices is still
+  unconfirmed. Tile spacing is ~30 CSS px, under the 44 px touch guideline but well up from where it
+  started.
 - The keep sits on the board's near corner, so eight tiles touch it. Sealing that ring is still the
   strongest opening; the rest of the board earns its place as archer ground and as maze space.
 - Walls are deliberately flat at this distance (a full-height stack is only a little taller than a

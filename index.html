@@ -69,31 +69,27 @@
 const CONFIG = {
   world: { w: 1280, h: 720 },
 
-  // The board is 14 x 14 square tiles, and each tile holds TWO half-tile bricks
-  // side by side — 360 buildable slots. The split runs across whichever axis
-  // points at the keep, so every brick turns its long face toward it; keeping
-  // the tiles themselves square is what lets that vary by region without the
-  // grid developing a ragged seam.
+  // The board fills a SCREEN RECTANGLE rather than being a diamond.
   //
-  // One brick in a tile is a thin, cheap wall. Two is a proper thick one.
+  // A diamond can only ever cover half its bounding box — the four corners of
+  // the screen go to waste. Selecting the tiles that fall inside a rectangle
+  // instead uses the whole area, which buys much larger tiles for the same tile
+  // count: ~200 tiles at 100x53 here, against 196 at 80x42 before. Tile spacing
+  // goes from 23.5 to ~29.5 CSS px, which is what a thumb actually notices.
   //
-  // uw / uh are the screen size of one plan unit. Both are at their limit:
-  // width is 14*uw against the palette, height is 14*uh plus a full stack of
-  // clearance above the far corner, inside 720 minus the HUD.
-  //
-  // Tiles are 23.5 CSS px apart, and a tap picks the tile first and then the
-  // nearer half of it — so a slip costs you the wrong half, not the wrong tile.
+  // Each tile holds TWO half-tile bricks side by side, split across whichever
+  // axis points at the keep so every brick turns its long face toward it. One
+  // brick in a tile is a thin, cheap wall; two is a proper thick one.
   //
   // A fixed camera means a tall stack hides what is diagonally behind it, by
   // (maxHeight x zh / uh) plan units — about 1.1 here. PEEK exists for that.
   board: {
-    planX: 14, planY: 14,     // board extent in plan units
+    rect: { x0: 14, x1: 1138, y0: 190, y1: 712 },   // tiles must fall inside this
     cellX: 1, cellY: 1,       // tiles are square: the pathfinding lattice
     slotsPerTile: 2,          // each tile holds two half-tile bricks
-    uw: 80, uh: 42, zh: 12,
+    uw: 100, uh: 53, zh: 15,
     maxHeight: 4,
-    keepPlan: 4,              // the keep is 4 x 4 plan units at the near corner
-    originX: 570, originY: 130,
+    keepPlan: 4,              // the keep is 4 x 4 tiles, at the near edge
   },
 
   // How much of its cell a brick fills. Short of 1 so a mortar joint shows
@@ -111,10 +107,6 @@ const CONFIG = {
   ui: {
     hudH: 56,
     barX: 1154, barW: 118, btnH: 88, btnGap: 8,
-    // Targets sit above the fingertip so a thumb never covers the tile it is
-    // choosing. Larger than it looks because tiles are small now — you aim with
-    // the ghost, not the finger, and a connector line ties the two together.
-    touchLift: 58,
     maxDpr: 2,
   },
 
@@ -211,14 +203,12 @@ const SKY = [
 
 const W = CONFIG.world.w, H = CONFIG.world.h;
 
-// Cell size in plan units, and how many cells that makes on each axis.
+// Cell size in plan units.
 const SX = CONFIG.board.cellX, SY = CONFIG.board.cellY;
-const NX = Math.round(CONFIG.board.planX / SX);   // 14 cells along +x
-const NY = Math.round(CONFIG.board.planY / SY);   // 28 cells along +y
-
 const UW = CONFIG.board.uw, UH = CONFIG.board.uh, ZH = CONFIG.board.zh;
 const MAXH = CONFIG.board.maxHeight;
 const US = CONFIG.unitScale, FX = CONFIG.fxScale;
+const RECT = CONFIG.board.rect;
 
 const SLOTS = CONFIG.board.slotsPerTile;
 // Half-extents of one brick, per orientation: 0 lays its length along +x, 1
@@ -226,22 +216,47 @@ const SLOTS = CONFIG.board.slotsPerTile;
 const BLONG = SX / 2 * CONFIG.brick.fill;
 const BSHORT = SY / (2 * SLOTS) * CONFIG.brick.fill;
 const BRICK_EXT = [{ hx: BLONG, hy: BSHORT }, { hx: BSHORT, hy: BLONG }];
-const SPAN = BLONG + BSHORT;                       // half the brick's screen width, in plan units
+const SPAN = BLONG + BSHORT;
 
-// Cells run to (NX-1)*SX and (NY-1)*SY, which are not equal, so the diamond
-// would sit off-centre without this nudge.
-const OX = CONFIG.board.originX + (((NY - 1) * SY) - ((NX - 1) * SX)) * UW / 4;
-const OY = CONFIG.board.originY;
+// In isometric, (px - py) sets the horizontal position and (px + py) the depth.
+// So the tiles that land inside a screen rectangle are exactly those whose
+// difference and sum fall in a range — HALFW wide, DEPTH deep. A tile's outer
+// corner has to fit too, hence the +1 when solving for each bound.
+const HALFW = Math.floor((RECT.x1 - RECT.x0) / 2 / (UW / 2)) - 1;
+const DEPTH = Math.floor((RECT.y1 - RECT.y0) / (UH / 2)) - 1;
 
-// The keep sits on the near corner, so both far faces are open approaches and
-// the player defends a corner rather than a line. Measured in plan units so it
-// keeps the same physical size however finely the board is divided.
-const PLAN_MAX_X = (NX - 1) * SX, PLAN_MAX_Y = (NY - 1) * SY;
-const KEEP_TX = Math.round(CONFIG.board.keepPlan / SX);
-const KEEP_TY = Math.round(CONFIG.board.keepPlan / SY);
+// Plan coordinates are signed around the top-centre tile; grid indices are not,
+// so they carry this shift.
+const SHIFT = Math.ceil(HALFW / 2) + 1;
+const GN = Math.ceil((DEPTH + HALFW) / 2) + SHIFT + 1;
+
+const OX = (RECT.x0 + RECT.x1) / 2;
+const OY = RECT.y0 + UH / 2;
+
+const planX = (gx) => (gx - SHIFT) * SX;
+const planY = (gy) => (gy - SHIFT) * SY;
+const cellXOf = (px) => Math.round(px / SX) + SHIFT;
+const cellYOf = (py) => Math.round(py / SY) + SHIFT;
+
+// Which grid indices are actually on the board.
+const NX = GN, NY = GN;
+const BOARD_MASK = new Uint8Array(GN * GN);
+for (let gx = 0; gx < GN; gx++) {
+  for (let gy = 0; gy < GN; gy++) {
+    const u = planX(gx) - planY(gy), v = planX(gx) + planY(gy);
+    if (Math.abs(u) <= HALFW && v >= 0 && v <= DEPTH) BOARD_MASK[gy * GN + gx] = 1;
+  }
+}
+
+// The keep sits against the near edge, centred, so the whole far side is open
+// approach and the player defends a frontage rather than a point.
+const KEEP_N = CONFIG.board.keepPlan;
+const KEEP_V = DEPTH - (DEPTH % 2);              // deepest even sum, i.e. the near-centre tile
+const KEEP_GX0 = SHIFT + KEEP_V / 2 - (KEEP_N - 1);
+const KEEP_GY0 = SHIFT + KEEP_V / 2 - (KEEP_N - 1);
 const KEEP_TILES = [];
-for (let kx = NX - KEEP_TX; kx < NX; kx++) {
-  for (let ky = NY - KEEP_TY; ky < NY; ky++) KEEP_TILES.push([kx, ky]);
+for (let kx = KEEP_GX0; kx < KEEP_GX0 + KEEP_N; kx++) {
+  for (let ky = KEEP_GY0; ky < KEEP_GY0 + KEEP_N; ky++) KEEP_TILES.push([kx, ky]);
 }
 
 /* ==========================================================================
@@ -283,16 +298,12 @@ function fmtTime(s) {
   return `${m}:${r < 10 ? "0" : ""}${r}`;
 }
 
-const ti = (gx, gy) => gy * NX + gx;
-const inBoard = (gx, gy) => gx >= 0 && gx < NX && gy >= 0 && gy < NY;
+const ti = (gx, gy) => gy * GN + gx;
+const inBoard = (gx, gy) => gx >= 0 && gx < GN && gy >= 0 && gy < GN && BOARD_MASK[gy * GN + gx] === 1;
 
 // Plan coordinates are the game's real space: invaders move through them,
-// distances and speeds are measured in them, and cells are just a grid laid
-// over them. Cell (gx,gy) is centred at (gx*SX, gy*SY).
-const planX = (gx) => gx * SX;
-const planY = (gy) => gy * SY;
-const cellXOf = (px) => Math.round(px / SX);
-const cellYOf = (py) => Math.round(py / SY);
+// distances and speeds are measured in them, and grid indices are a lattice
+// laid over them.
 
 /* ---- Isometric projection ------------------------------------------------ */
 
@@ -671,17 +682,17 @@ const Scenery = {
 
   rival(c, x, baseY, alpha) {
     c.save(); c.globalAlpha = alpha; c.fillStyle = "#2b3040";
-    const towers = [[0, 116, 38], [44, 156, 34], [86, 96, 36], [124, 138, 44]];
+    const towers = [[0, 74, 30], [34, 104, 26], [66, 60, 28], [96, 90, 34]];
     for (const [dx, h, w] of towers) {
       c.fillRect(x + dx, baseY - h, w, h);
-      for (let i = 0; i < Math.floor(w / 13); i++) c.fillRect(x + dx + i * 13, baseY - h - 9, 8, 9);
+      for (let i = 0; i < Math.floor(w / 11); i++) c.fillRect(x + dx + i * 11, baseY - h - 7, 7, 7);
     }
     c.fillStyle = "rgba(255,120,60,0.5)";
     const r = mulberry32(Math.round(x));
-    for (let i = 0; i < 6; i++) c.fillRect(x + r() * 155, baseY - r() * 140 - 16, 4, 7);
+    for (let i = 0; i < 6; i++) c.fillRect(x + r() * 120, baseY - r() * 90 - 12, 3, 6);
     c.fillStyle = "#7a2230";
-    c.fillRect(x + 54, baseY - 192, 3, 34);
-    c.beginPath(); c.moveTo(x + 57, baseY - 192); c.lineTo(x + 84, baseY - 185); c.lineTo(x + 57, baseY - 173);
+    c.fillRect(x + 42, baseY - 132, 3, 26);
+    c.beginPath(); c.moveTo(x + 45, baseY - 132); c.lineTo(x + 66, baseY - 126); c.lineTo(x + 45, baseY - 117);
     c.closePath(); c.fill();
     c.restore();
   },
@@ -705,13 +716,10 @@ let projectiles = [];
 let particles = [];
 let flowGround = null, flowClimb = null, flowDirty = true;
 
-const Pointer = { x: -999, y: -999, down: false, active: false, coarse: false, id: null, aiming: false };
+const Pointer = { x: -999, y: -999, down: false, active: false, coarse: false, id: null };
 
-// Where the tool actually lands. On touch the target is lifted above the
-// fingertip so the thumb never covers the tile being chosen.
-function aimPoint() {
-  return { x: Pointer.x, y: Pointer.y - (Pointer.coarse ? CONFIG.ui.touchLift : 0) };
-}
+// The tool lands exactly under the pointer — no offset on either input type.
+function aimPoint() { return { x: Pointer.x, y: Pointer.y }; }
 const maxParticles = () => Pointer.coarse ? CONFIG.fx.maxParticlesTouch : CONFIG.fx.maxParticles;
 
 // Set lookup rather than a scan: this runs inside the pathfinding and render
@@ -725,11 +733,12 @@ const isKeepTile = (gx, gy) => inBoard(gx, gy) && KEEP_SET.has(ti(gx, gy));
 // degree brick — so this snaps to whichever axis is closer. The board therefore
 // splits on the diagonal, and walls crossing that line change coursing the way
 // real brickwork does at a corner.
-const KEEP_CENTRE = (NX - 1) - (CONFIG.board.keepPlan - 1) / 2;
-const TILE_ORIENT = new Uint8Array(NX * NY);
-for (let gx = 0; gx < NX; gx++) {
-  for (let gy = 0; gy < NY; gy++) {
-    const dx = Math.abs(KEEP_CENTRE - gx), dy = Math.abs(KEEP_CENTRE - gy);
+const KEEP_CENTRE_X = planX(KEEP_GX0) + (KEEP_N - 1) / 2;
+const KEEP_CENTRE_Y = planY(KEEP_GY0) + (KEEP_N - 1) / 2;
+const TILE_ORIENT = new Uint8Array(GN * GN);
+for (let gx = 0; gx < GN; gx++) {
+  for (let gy = 0; gy < GN; gy++) {
+    const dx = Math.abs(KEEP_CENTRE_X - planX(gx)), dy = Math.abs(KEEP_CENTRE_Y - planY(gy));
     TILE_ORIENT[ti(gx, gy)] = dx > dy ? 1 : 0;
   }
 }
@@ -749,7 +758,7 @@ function loadBest() {
 function saveBest(v) { try { localStorage.setItem("wallbuilder.iso.best", String(v)); } catch (e) {} }
 
 function resetGame() {
-  stacks = Array.from({ length: NX * NY * SLOTS }, () => []);
+  stacks = Array.from({ length: GN * GN * SLOTS }, () => []);
   invaders.length = 0; projectiles.length = 0; particles.length = 0;
   Game.t = 0;
   Game.gold = CONFIG.economy.startGold;
@@ -918,7 +927,7 @@ function tileCost(gx, gy, climb, step) {
 }
 
 function computeFlow(climb) {
-  const size = NX * NY;
+  const size = GN * GN;
   const dist = new Float64Array(size).fill(Infinity);
   const next = new Int16Array(size).fill(-1);
   const done = new Uint8Array(size);
@@ -932,7 +941,7 @@ function computeFlow(climb) {
     const cur = q.splice(bi, 1)[0];
     if (done[cur]) continue;
     done[cur] = 1;
-    const cx = cur % NX, cy = (cur / NX) | 0;
+    const cx = cur % GN, cy = (cur / GN) | 0;
     for (const [dx, dy, step] of DIRS) {
       const nx = cx + dx, ny = cy + dy;
       if (!inBoard(nx, ny) || isKeepTile(nx, ny)) continue;
@@ -959,7 +968,7 @@ function nextTile(inv, gx, gy) {
   if (!f) return null;
   const n = f.next[ti(gx, gy)];
   if (n < 0) return null;
-  return { gx: n % NX, gy: (n / NX) | 0 };
+  return { gx: n % GN, gy: (n / GN) | 0 };
 }
 
 /* ==========================================================================
@@ -1011,11 +1020,15 @@ function updateParticles(dt) {
 
 // Fronts are described in tile space; entry runs along a board edge and the
 // spawn point sits just outside it so they visibly march in.
+// Entry points, described in the same (across, depth) terms the board is: a
+// point just outside one edge of the rectangle, converted back to plan.
+function edgeSpawn(u, v) { return { gx: (v + u) / 2, gy: (v - u) / 2 }; }
+const MARGIN = 2.5;
 const FRONTS = [
-  { id: "west",  unlock: 0, pick: () => ({ gx: -2.0, gy: rand(0, PLAN_MAX_Y) }) },
-  { id: "north", unlock: 0, pick: () => ({ gx: rand(0, PLAN_MAX_X), gy: -2.0 }) },
-  { id: "flank", unlock: CONFIG.spawn.flankUnlock,
-    pick: () => ({ gx: rand(0, PLAN_MAX_X - 3), gy: PLAN_MAX_Y + 2.0 }) },
+  { id: "west",  unlock: 0, pick: () => edgeSpawn(-HALFW - MARGIN, rand(0, DEPTH * 0.75)) },
+  { id: "north", unlock: 0, pick: () => edgeSpawn(rand(-HALFW, HALFW), -MARGIN) },
+  { id: "east",  unlock: CONFIG.spawn.flankUnlock,
+    pick: () => edgeSpawn(HALFW + MARGIN, rand(0, DEPTH * 0.75)) },
 ];
 
 function spawnInvader(type, front) {
@@ -1144,9 +1157,9 @@ function moveToward(inv, tx, ty, dt, mul = 1) {
 function stepMarch(inv, dt) {
   const cx = cellXOf(inv.gx), cy = cellYOf(inv.gy);
 
-  // Off the board: walk to the nearest edge and enter.
+  // Off the board: head for the keep until the grid picks them up.
   if (!inBoard(cx, cy)) {
-    moveToward(inv, clamp(inv.gx, 0, PLAN_MAX_X), clamp(inv.gy, 0, PLAN_MAX_Y), dt);
+    moveToward(inv, KEEP_CENTRE_X, KEEP_CENTRE_Y, dt);
     return;
   }
 
@@ -1238,7 +1251,8 @@ function stepFuse(inv, dt) {
 
 function nearestWallOrKeep(inv) {
   let best = null, bd = Infinity;
-  for (let gx = 0; gx < NX; gx++) for (let gy = 0; gy < NY; gy++) {
+  for (let gx = 0; gx < GN; gx++) for (let gy = 0; gy < GN; gy++) {
+    if (!inBoard(gx, gy)) continue;
     if (heightAt(gx, gy) === 0 && !isKeepTile(gx, gy)) continue;
     const d = Math.hypot(planX(gx) - inv.gx, planY(gy) - inv.gy);
     if (d < bd) { bd = d; best = { gx, gy }; }
@@ -1277,7 +1291,8 @@ function fireArrow(gx, gy, h, level) {
 function lobRock(inv) {
   // Aim at the tallest stack — catapults punish exactly what climbers can't beat.
   let bt = null, bh = 0;
-  for (let gx = 0; gx < NX; gx++) for (let gy = 0; gy < NY; gy++) {
+  for (let gx = 0; gx < GN; gx++) for (let gy = 0; gy < GN; gy++) {
+    if (!inBoard(gx, gy)) continue;
     const h = heightAt(gx, gy);
     if (h > bh) { bh = h; bt = { gx, gy }; }
   }
@@ -1347,7 +1362,8 @@ function updateProjectiles(dt) {
 }
 
 function updateArchers(dt) {
-  for (let gx = 0; gx < NX; gx++) for (let gy = 0; gy < NY; gy++) {
+  for (let gx = 0; gx < GN; gx++) for (let gy = 0; gy < GN; gy++) {
+    if (!inBoard(gx, gy)) continue;
     for (let h = 0; h < SLOTS; h++) {
       const st = slotStack(gx, gy, h);
       for (let l = 0; l < st.length; l++) {
@@ -1520,7 +1536,7 @@ function pickTile(wx, wy) {
   // plan depth, since a step along y is only half a step along x.
   const order = pickOrder();
   for (const idx of order) {
-    const gx = idx % NX, gy = (idx / NX) | 0;
+    const gx = idx % GN, gy = (idx / GN) | 0;
     if (pointInPoly(wx, wy, tileSilhouette(gx, gy))) return { gx, gy };
   }
   return null;
@@ -1530,8 +1546,9 @@ function pickTile(wx, wy) {
 let PICK_ORDER = null;
 function pickOrder() {
   if (!PICK_ORDER) {
-    PICK_ORDER = Array.from({ length: NX * NY }, (_, i) => i)
-      .sort((a, b) => cellDepth(b % NX, (b / NX) | 0) - cellDepth(a % NX, (a / NX) | 0));
+    PICK_ORDER = Array.from({ length: GN * GN }, (_, i) => i)
+      .filter((i) => inBoard(i % GN, (i / GN) | 0))
+      .sort((a, b) => cellDepth(b % GN, (b / GN) | 0) - cellDepth(a % GN, (a / GN) | 0));
   }
   return PICK_ORDER;
 }
@@ -1557,7 +1574,7 @@ function drawSky() {
   const key = Math.floor(phase * 90);
   if (skyCache.key !== key) {
     const info = skyAt(phase);
-    const g = ctx.createLinearGradient(0, 0, 0, 420);
+    const g = ctx.createLinearGradient(0, 0, 0, CONFIG.board.rect.y0 + 40);
     g.addColorStop(0, info.top); g.addColorStop(1, info.bot);
     skyCache = { key, grad: g, info };
   }
@@ -1566,8 +1583,8 @@ function drawSky() {
 
   const ang = phase * Math.PI * 2 - Math.PI / 2;
   const cx = W * 0.5 + Math.cos(ang) * W * 0.42;
-  const cy = 210 + Math.sin(ang) * 150;
-  const setting = clamp((330 - cy) / 120, 0, 1);
+  const cy = CONFIG.board.rect.y0 * 0.52 + Math.sin(ang) * CONFIG.board.rect.y0 * 0.40;
+  const setting = clamp((CONFIG.board.rect.y0 * 0.92 - cy) / 70, 0, 1);
   if (setting > 0.01) {
     ctx.fillStyle = skyCache.info.sun;
     ctx.globalAlpha = 0.9 * setting;
@@ -1582,7 +1599,7 @@ function drawSky() {
     const rng = mulberry32(4242);
     ctx.fillStyle = `rgba(255,255,255,${(dark - 0.2) * 0.9})`;
     for (let i = 0; i < 60; i++) {
-      const x = rng() * W, y = rng() * 300, r = rng() * 1.6 + 0.5;
+      const x = rng() * W, y = rng() * CONFIG.board.rect.y0, r = rng() * 1.6 + 0.5;
       ctx.fillRect(x, y, r, r);
     }
   }
@@ -1596,28 +1613,28 @@ function tileDiamond(cx, cy) {
 }
 
 function drawGround() {
-  // The plane itself, plus a soft skirt so it reads as a plateau rather than a
-  // sheet of paper floating in the sky.
+  // The board is a rectangle now, so its outline is one — but the tiles that
+  // make it up are diamonds, so the edge is stepped. Filling each tile is what
+  // gives that stepped edge cleanly; a single rectangle would overhang it.
   const [T, R, B, L] = CELL_CORNERS;
-  const nX = isoX(0, 0) + T[0], nY = isoY(0, 0) + T[1];
-  const eX = isoX(NX - 1, 0) + R[0], eY = isoY(NX - 1, 0) + R[1];
-  const sX = isoX(NX - 1, NY - 1) + B[0], sY = isoY(NX - 1, NY - 1) + B[1];
-  const wX = isoX(0, NY - 1) + L[0], wY = isoY(0, NY - 1) + L[1];
+  const skirt = 10;
 
   ctx.fillStyle = "#2f3a24";
   ctx.beginPath();
-  ctx.moveTo(wX, wY); ctx.lineTo(sX, sY); ctx.lineTo(eX, eY);
-  ctx.lineTo(eX, eY + 12); ctx.lineTo(sX, sY + 12); ctx.lineTo(wX, wY + 12);
-  ctx.closePath(); ctx.fill();
+  ctx.rect(RECT.x0, RECT.y0, RECT.x1 - RECT.x0, RECT.y1 - RECT.y0 + skirt);
+  ctx.fill();
 
-  ctx.fillStyle = "#4e5c33";
-  ctx.beginPath();
-  ctx.moveTo(nX, nY); ctx.lineTo(eX, eY); ctx.lineTo(sX, sY); ctx.lineTo(wX, wY);
-  ctx.closePath(); ctx.fill();
-
-  for (let gx = 0; gx < NX; gx++) for (let gy = 0; gy < NY; gy++) {
+  for (let gx = 0; gx < GN; gx++) for (let gy = 0; gy < GN; gy++) {
+    if (!inBoard(gx, gy)) continue;
     const cx = isoX(gx, gy), cy = isoY(gx, gy);
-    if (isKeepTile(gx, gy)) continue;
+    tileDiamond(cx, cy);
+    ctx.fillStyle = "#4e5c33";
+    ctx.fill();
+  }
+
+  for (let gx = 0; gx < GN; gx++) for (let gy = 0; gy < GN; gy++) {
+    if (!inBoard(gx, gy) || isKeepTile(gx, gy)) continue;
+    const cx = isoX(gx, gy), cy = isoY(gx, gy);
     tileDiamond(cx, cy);
     ctx.fillStyle = (gx + gy) % 2 ? "rgba(255,255,255,0.030)" : "rgba(0,0,0,0.035)";
     ctx.fill();
@@ -1625,14 +1642,18 @@ function drawGround() {
     ctx.lineWidth = 1;
     ctx.stroke();
   }
+
+  // A lip along the near edge so the plate reads as ground with thickness.
+  ctx.fillStyle = "rgba(18,24,12,0.55)";
+  ctx.fillRect(RECT.x0, RECT.y1 - 2, RECT.x1 - RECT.x0, skirt + 2);
 }
 
 function drawKeep() {
   // Drawn as one solid structure spanning the whole keep footprint, whatever
   // size that is, rather than a cluster of separate towers.
-  const cx = OX;                                    // the footprint is symmetric about the diagonal
-  const baseY = isoY(NX - 1, NY - 1) + CELL_CORNERS[2][1];
-  const topY = isoY(NX - KEEP_TX, NY - KEEP_TY) + CELL_CORNERS[0][1];
+  const cx = isoX(KEEP_GX0, KEEP_GY0);              // the footprint is symmetric about the diagonal
+  const baseY = isoY(KEEP_GX0 + KEEP_N - 1, KEEP_GY0 + KEEP_N - 1) + CELL_CORNERS[2][1];
+  const topY = isoY(KEEP_GX0, KEEP_GY0) + CELL_CORNERS[0][1];
   const hw = CONFIG.board.keepPlan * UW / 2;
 
   // Footprint.
@@ -2026,12 +2047,12 @@ function drawScene(alpha) {
   drawGround();
 
   drawables.length = 0;
-  for (let gx = 0; gx < NX; gx++) for (let gy = 0; gy < NY; gy++) {
-    if (isKeepTile(gx, gy)) continue;
+  for (let gx = 0; gx < GN; gx++) for (let gy = 0; gy < GN; gy++) {
+    if (isKeepTile(gx, gy) || !inBoard(gx, gy)) continue;
     if (heightAt(gx, gy)) drawables.push({ d: cellDepth(gx, gy), k: 0, gx, gy });
   }
   // Keep sits on the near corner; give it that corner's depth.
-  drawables.push({ d: cellDepth(NX - KEEP_TX, NY - KEEP_TY), k: 3 });
+  drawables.push({ d: cellDepth(KEEP_GX0, KEEP_GY0), k: 3 });
   for (const inv of invaders) {
     if (inv.dead) continue;
     const d = depthOf(lerp(inv.pgx, inv.gx, alpha), lerp(inv.pgy, inv.gy, alpha));
@@ -2065,22 +2086,6 @@ function drawBuildHints() {
   const sx = isoPX(px, py), sy = isoPY(px, py);
   const cx = isoX(gx, gy), cy = isoY(gx, gy);
   const tool = Game.tool;
-
-  // Tie the lifted target back to the fingertip, so the offset reads as
-  // deliberate rather than as the game ignoring where you touched.
-  if (Pointer.coarse && Pointer.down) {
-    ctx.strokeStyle = "rgba(255,255,255,0.34)";
-    ctx.lineWidth = 1.5;
-    ctx.setLineDash([4, 4]);
-    ctx.beginPath();
-    ctx.moveTo(Pointer.x, Pointer.y);
-    ctx.lineTo(sx, sy + CELL_HH * 0.5);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.beginPath();
-    ctx.arc(Pointer.x, Pointer.y, 5, 0, 6.284);
-    ctx.stroke();
-  }
 
   // Faint outline of the whole tile, so which tile you are on stays obvious
   // even though the brick only fills half of it.
@@ -2409,17 +2414,41 @@ function toolAtPoint(wx, wy) {
 }
 const inRect = (wx, wy, r) => r && wx >= r.x && wx <= r.x + r.w && wy >= r.y && wy <= r.y + r.h;
 
-function applyTool(wx, wy, ignoreCooldown) {
+// The last slot this stroke touched, so a drag never re-applies to the same one.
+let strokeSlot = null;
+
+function applyTool(wx, wy, fromDrag) {
   if (Game.state !== "playing") return;
-  if (Game.buildCd > 0 && !ignoreCooldown) return;
   const hit = pickTile(wx, wy);
   if (!hit) return;
   const h = slotAt(hit.gx, hit.gy, wx, wy);
+  const key = ti(hit.gx, hit.gy) * SLOTS + h;
+
+  // A drag lays a run: every new slot it crosses gets built, with no cooldown
+  // between them, because the cooldown exists to stop a frantic tap-storm, not
+  // to put gaps in a deliberate line. Gold is the real limit. Re-entering the
+  // slot you are already on does nothing.
+  if (fromDrag) { if (key === strokeSlot) return; }
+  else if (Game.buildCd > 0) return;
+  strokeSlot = key;
+
   let acted;
   if (Game.tool === "repair") acted = repairTop(hit.gx, hit.gy, h);
   else if (Game.tool === "demolish") acted = demolishTop(hit.gx, hit.gy, h);
   else acted = placeBrick(Game.tool, hit.gx, hit.gy, h);
-  if (acted) Game.buildCd = CONFIG.economy.buildCooldown;
+  if (acted && !fromDrag) Game.buildCd = CONFIG.economy.buildCooldown;
+}
+
+// Walk the line between two pointer samples. Touch move events coalesce, so a
+// quick swipe reports a handful of widely spaced points — applying only at
+// those would leave holes in the row.
+function applyAlong(x0, y0, x1, y1) {
+  const step = Math.min(CELL_HW, CELL_HH) * 0.6;
+  const dist = Math.hypot(x1 - x0, y1 - y0);
+  const n = Math.max(1, Math.min(64, Math.ceil(dist / step)));
+  for (let i = 1; i <= n; i++) {
+    applyTool(lerp(x0, x1, i / n), lerp(y0, y1, i / n), true);
+  }
 }
 
 function onDown(e) {
@@ -2445,43 +2474,34 @@ function onDown(e) {
   const t = toolAtPoint(p.x, p.y);
   if (t) { Game.tool = t; return; }
 
-  // Touch aims rather than builds. Tiles are ~23 CSS px apart here, well under
-  // what a thumb can hit blind, so touching down only picks a target: you slide
-  // to correct it and it commits on release. A mouse is precise enough to place
-  // immediately, and keeps drag-to-lay-a-run.
-  if (Pointer.coarse) { Pointer.aiming = true; return; }
+  // Straight to where you touched. Aim-and-release tested worse on a real
+  // phone than simply placing under the finger, so both pointer types now
+  // build on contact and paint on drag.
+  strokeSlot = null;
   applyTool(p.x, p.y);
 }
 
 function onMove(e) {
   if (Pointer.id !== null && e.pointerId !== Pointer.id && Pointer.down) return;
+  const prevX = Pointer.x, prevY = Pointer.y;
   const p = Viewport.toWorld(e.clientX, e.clientY);
   Pointer.x = p.x; Pointer.y = p.y;
   Pointer.active = true;
   if (e.pointerType) Pointer.coarse = e.pointerType !== "mouse";
   if (!Pointer.down) return;
   e.preventDefault();
-  if (Pointer.aiming) return;               // sliding only adjusts the target
   if (p.x >= CONFIG.ui.barX - 12) return;   // dragging over the palette must not build
-  applyTool(p.x, p.y);
+  applyAlong(prevX, prevY, p.x, p.y);
 }
 
 function onUp(e) {
   if (Pointer.id !== null && e.pointerId !== Pointer.id) return;
-  if (Pointer.aiming) {
-    const a = aimPoint();
-    // Release outside the board area cancels rather than building somewhere odd.
-    if (a.x < CONFIG.ui.barX - 12) applyTool(a.x, a.y, true);
-    Pointer.aiming = false;
-  }
-  Pointer.down = false; Pointer.id = null;
+  Pointer.down = false; Pointer.id = null; strokeSlot = null;
   if (e.pointerType && e.pointerType !== "mouse") Pointer.active = false;
 }
 // The OS steals touches for system gestures; without this a half-finished drag
-// would leave the pointer stuck down — and an aim must be abandoned, not built.
-function onCancel() {
-  Pointer.down = false; Pointer.id = null; Pointer.active = false; Pointer.aiming = false;
-}
+// would leave the pointer stuck down.
+function onCancel() { Pointer.down = false; Pointer.id = null; Pointer.active = false; strokeSlot = null; }
 
 canvas.addEventListener("pointerdown", onDown, { passive: false });
 canvas.addEventListener("pointermove", onMove, { passive: false });
@@ -2559,7 +2579,7 @@ requestAnimationFrame(frame);
 
 /* Exposed for debugging and automated checks. */
 window.__game = {
-  Game, CONFIG, Viewport, BRICKS, INVADERS, NX, NY, SLOTS,
+  Game, CONFIG, Viewport, BRICKS, INVADERS, GN, SLOTS, HALFW, DEPTH, inBoard,
   get stacks() { return stacks; },
   get invaders() { return invaders; },
   get projectiles() { return projectiles; },
@@ -2576,8 +2596,11 @@ window.__game = {
   routeOpen() {
     refreshFlow();
     const edges = [];
-    for (let gx = 0; gx < NX; gx++) { edges.push([gx, 0]); edges.push([gx, NY - 1]); }
-    for (let gy = 0; gy < NY; gy++) { edges.push([0, gy]); edges.push([NX - 1, gy]); }
+    for (let gx = 0; gx < GN; gx++) for (let gy = 0; gy < GN; gy++) {
+      if (!inBoard(gx, gy)) continue;
+      // A boundary tile is one with a missing orthogonal neighbour.
+      if ([[1,0],[-1,0],[0,1],[0,-1]].some(([dx,dy]) => !inBoard(gx+dx, gy+dy))) edges.push([gx, gy]);
+    }
     {
       for (const [ex, ey] of edges) {
         if (isKeepTile(ex, ey)) continue;
@@ -2595,7 +2618,7 @@ window.__game = {
       if (stacks[i].length > MAXH) problems.push(`stack over max height at slot ${i}`);
     }
     for (const [kx, ky] of KEEP_TILES) if (heightAt(kx, ky) > 0) problems.push("brick built on the keep");
-    if (stacks.length !== NX * NY * SLOTS) problems.push(`grid is ${stacks.length}, expected ${NX * NY * SLOTS}`);
+    if (stacks.length !== GN * GN * SLOTS) problems.push(`grid is ${stacks.length}, expected ${GN * GN * SLOTS}`);
     if (Game.gold < 0) problems.push(`negative gold: ${Game.gold}`);
     const states = new Set(["march", "wait", "attack", "fuse", "ranged"]);
     for (const inv of invaders) {
