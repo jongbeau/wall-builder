@@ -66,8 +66,35 @@
    CONFIG — every tunable lives here. Balance without touching logic.
    ========================================================================== */
 
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+
+// Measure the usable screen before anything else, so the world can be SHAPED to
+// it rather than letterboxed inside it. A fixed 16:9 world wastes ~11% of the
+// width on a 2:1 phone; matching the aspect spends that on board instead.
+function availableBox() {
+  const cs = getComputedStyle(document.getElementById("safe"));
+  const pad = (k) => parseFloat(cs[k]) || 0;
+  const vv = window.visualViewport;
+  const vw = Math.round(vv ? vv.width : window.innerWidth);
+  const vh = Math.round(vv ? vv.height : window.innerHeight);
+  return {
+    w: Math.max(1, vw - pad("paddingLeft") - pad("paddingRight")),
+    h: Math.max(1, vh - pad("paddingTop") - pad("paddingBottom")),
+  };
+}
+
+// Fixed height, variable width. Measured once at load: the aspect of a phone
+// does not change, and rebuilding the grid mid-game would invalidate the board.
+// Later resizes letterbox as before.
+const H = 720;
+const AVAIL = availableBox();
+const W = Math.round(clamp(H * (AVAIL.w / Math.max(1, AVAIL.h)), 1280, 1920) / 2) * 2;
+
+const BAR_W = 118, BAR_GAP = 8;
+const BAR_X = W - BAR_W - BAR_GAP;
+
 const CONFIG = {
-  world: { w: 1280, h: 720 },
+  world: { w: W, h: H },
 
   // The board fills a SCREEN RECTANGLE rather than being a diamond.
   //
@@ -84,10 +111,10 @@ const CONFIG = {
   // A fixed camera means a tall stack hides what is diagonally behind it, by
   // (maxHeight x zh / uh) plan units — about 1.1 here. PEEK exists for that.
   board: {
-    rect: { x0: 14, x1: 1138, y0: 190, y1: 712 },   // tiles must fall inside this
+    rect: { x0: 14, x1: BAR_X - 16, y0: 0, y1: 712 },   // y0 is solved for below
     cellX: 1, cellY: 1,       // tiles are square: the pathfinding lattice
     slotsPerTile: 2,          // each tile holds two half-tile bricks
-    uw: 100, uh: 53, zh: 15,
+    uw: 100, uh: 53, zh: 15,   // starting point; fitBoard() resizes these to the rect
     maxHeight: 4,
     keepPlan: 4,              // the keep is 4 x 4 tiles, at the near edge
   },
@@ -106,7 +133,7 @@ const CONFIG = {
 
   ui: {
     hudH: 56,
-    barX: 1154, barW: 118, btnH: 88, btnGap: 8,
+    barX: BAR_X, barW: BAR_W, btnH: 88, btnGap: 8,
     maxDpr: 2,
   },
 
@@ -115,8 +142,8 @@ const CONFIG = {
     // it rather than four, which doubles both the wall to maintain and the
     // attackers that can reach it at once — income has to follow or the opening
     // seal eats every coin and no archers ever get built.
-    startGold: 340,
-    income: 30,
+    startGold: 900,
+    income: 36,
     buildCooldown: 0.14,
     refund: 0.5,
     repairCost: 6,
@@ -201,7 +228,48 @@ const SKY = [
   { t: 1.00, top: "#5ea9e0", bot: "#cfe4f2", sun: "#fff4d6", dark: 0.00 },
 ];
 
-const W = CONFIG.world.w, H = CONFIG.world.h;
+
+// How many tiles fit a board HALFW across and DEPTH deep. Sum and difference
+// share a parity, so alternate rows are offset by one.
+function tileCount(halfw, depth) {
+  let n = 0;
+  for (let v = 0; v <= depth; v++) {
+    n += (v % 2 === 0) ? 2 * Math.floor(halfw / 2) + 1
+                       : 2 * Math.floor((halfw + 1) / 2);
+  }
+  return n;
+}
+
+// Pick the LARGEST tile that still yields the target count. A wider screen then
+// spends its extra room on bigger tiles rather than more of them, which keeps
+// the game the same size everywhere and is what a thumb wants.
+function fitBoard(rect, target, ratio) {
+  let best = { uw: 60, uh: Math.round(60 / ratio) };
+  for (let uw = 60; uw <= 240; uw++) {
+    const uh = Math.max(8, Math.round(uw / ratio));
+    const halfw = Math.floor((rect.x1 - rect.x0) / uw) - 1;
+    const depth = Math.floor((rect.y1 - rect.y0) / (uh / 2)) - 1;
+    if (halfw < 2 || depth < 2) break;
+    if (tileCount(halfw, depth) >= target) best = { uw, uh };
+  }
+  return best;
+}
+// The board runs from just under the HUD to the bottom of the screen. Its top
+// edge has to clear a full stack, whose height depends on the tile size, which
+// depends on the rectangle — so solve it by iterating a couple of times.
+const TILE_RATIO = 100 / 53;
+{
+  const r = CONFIG.board.rect;
+  let uw = 100, zh = 15;
+  for (let pass = 0; pass < 3; pass++) {
+    r.y0 = CONFIG.ui.hudH + 6 + CONFIG.board.maxHeight * zh;
+    uw = fitBoard(r, 196, TILE_RATIO).uw;
+    zh = Math.max(8, Math.round(15 * uw / 100));
+  }
+  CONFIG.board.uw = uw;
+  CONFIG.board.uh = Math.max(8, Math.round(uw / TILE_RATIO));
+  CONFIG.board.zh = zh;
+}
 
 // Cell size in plan units.
 const SX = CONFIG.board.cellX, SY = CONFIG.board.cellY;
@@ -263,7 +331,6 @@ for (let kx = KEEP_GX0; kx < KEEP_GX0 + KEEP_N; kx++) {
    Helpers
    ========================================================================== */
 
-const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
 const lerp = (a, b, t) => a + (b - a) * t;
 const rand = (a, b) => a + Math.random() * (b - a);
 const randInt = (a, b) => Math.floor(rand(a, b + 1));
@@ -370,7 +437,7 @@ const Viewport = {
     canvas.width = Math.round(vw * this.dpr);
     canvas.height = Math.round(vh * this.dpr);
 
-    Scenery.build();
+    Atlas.build(this.dpr);
   },
 
   // Mobile browsers fire resize/orientationchange late, early, or not at all.
@@ -641,62 +708,6 @@ function brickPath(c, cx, topCy, orient) {
   c.lineTo(P[2][0], P[2][1]);
   c.closePath();
 }
-
-/* ==========================================================================
-   Scenery — sky is live (it cycles); the ground plane, keep and the rival
-   kingdoms on the horizon are baked once per resize.
-   ========================================================================== */
-
-const Scenery = {
-  canvas: null,
-
-  build() {
-    Atlas.build(Viewport.dpr);
-    const dpr = Viewport.dpr;
-    const cv = document.createElement("canvas");
-    cv.width = Math.ceil(W * dpr); cv.height = Math.ceil(H * dpr);
-    const c = cv.getContext("2d");
-    c.scale(dpr, dpr);
-    const rng = mulberry32(20260810);
-
-    this.hills(c, rng, 300, 150, "#46536b", 0.55);
-    this.hills(c, rng, 350, 110, "#3b4658", 0.75);
-
-    // Rival kingdoms sit beyond the two far faces they attack from.
-    // Placed outside the board's silhouette — the rhombus leaves the left and
-    // right of the screen open even though it spans the full width.
-    this.rival(c, 46, 322, 0.85);
-    this.rival(c, 922, 322, 0.85);
-
-    this.canvas = cv;
-  },
-
-  hills(c, rng, baseY, amp, color, alpha) {
-    c.save(); c.globalAlpha = alpha; c.fillStyle = color;
-    c.beginPath(); c.moveTo(0, H); c.lineTo(0, baseY);
-    for (let x = 0; x <= W; x += 40) {
-      c.lineTo(x, baseY - Math.sin(x * 0.0042 + rng() * 0.06) * amp * 0.4 - Math.sin(x * 0.0011) * amp * 0.5);
-    }
-    c.lineTo(W, H); c.closePath(); c.fill(); c.restore();
-  },
-
-  rival(c, x, baseY, alpha) {
-    c.save(); c.globalAlpha = alpha; c.fillStyle = "#2b3040";
-    const towers = [[0, 74, 30], [34, 104, 26], [66, 60, 28], [96, 90, 34]];
-    for (const [dx, h, w] of towers) {
-      c.fillRect(x + dx, baseY - h, w, h);
-      for (let i = 0; i < Math.floor(w / 11); i++) c.fillRect(x + dx + i * 11, baseY - h - 7, 7, 7);
-    }
-    c.fillStyle = "rgba(255,120,60,0.5)";
-    const r = mulberry32(Math.round(x));
-    for (let i = 0; i < 6; i++) c.fillRect(x + r() * 120, baseY - r() * 90 - 12, 3, 6);
-    c.fillStyle = "#7a2230";
-    c.fillRect(x + 42, baseY - 132, 3, 26);
-    c.beginPath(); c.moveTo(x + 45, baseY - 132); c.lineTo(x + 66, baseY - 126); c.lineTo(x + 45, baseY - 117);
-    c.closePath(); c.fill();
-    c.restore();
-  },
-};
 
 /* ==========================================================================
    Game state
@@ -1567,42 +1578,17 @@ function skyAt(phase) {
            sun: mixHex(a.sun, b.sun, t), dark: lerp(a.dark, b.dark, t) };
 }
 
-let skyCache = { key: -1, grad: null, info: null };
+let skyCache = { key: -1, info: null };
 
-function drawSky() {
+// No sky any more — the board fills the screen, so all that is left is the
+// narrow band behind the HUD and the light level, which still shifts with the
+// day/night cycle to give the siege some sense of time passing.
+function drawBackdrop() {
   const phase = (Game.t / CONFIG.cycleTime) % 1;
   const key = Math.floor(phase * 90);
-  if (skyCache.key !== key) {
-    const info = skyAt(phase);
-    const g = ctx.createLinearGradient(0, 0, 0, CONFIG.board.rect.y0 + 40);
-    g.addColorStop(0, info.top); g.addColorStop(1, info.bot);
-    skyCache = { key, grad: g, info };
-  }
-  ctx.fillStyle = skyCache.grad;
+  if (skyCache.key !== key) skyCache = { key, info: skyAt(phase) };
+  ctx.fillStyle = mixHex("#141a24", skyCache.info.top, 0.35);
   ctx.fillRect(0, 0, W, H);
-
-  const ang = phase * Math.PI * 2 - Math.PI / 2;
-  const cx = W * 0.5 + Math.cos(ang) * W * 0.42;
-  const cy = CONFIG.board.rect.y0 * 0.52 + Math.sin(ang) * CONFIG.board.rect.y0 * 0.40;
-  const setting = clamp((CONFIG.board.rect.y0 * 0.92 - cy) / 70, 0, 1);
-  if (setting > 0.01) {
-    ctx.fillStyle = skyCache.info.sun;
-    ctx.globalAlpha = 0.9 * setting;
-    ctx.beginPath(); ctx.arc(cx, cy, 26, 0, 6.284); ctx.fill();
-    ctx.globalAlpha = 0.16 * setting;
-    ctx.beginPath(); ctx.arc(cx, cy, 52, 0, 6.284); ctx.fill();
-    ctx.globalAlpha = 1;
-  }
-
-  const dark = skyCache.info.dark;
-  if (dark > 0.2) {
-    const rng = mulberry32(4242);
-    ctx.fillStyle = `rgba(255,255,255,${(dark - 0.2) * 0.9})`;
-    for (let i = 0; i < 60; i++) {
-      const x = rng() * W, y = rng() * CONFIG.board.rect.y0, r = rng() * 1.6 + 0.5;
-      ctx.fillRect(x, y, r, r);
-    }
-  }
 }
 
 function tileDiamond(cx, cy) {
@@ -1649,79 +1635,179 @@ function drawGround() {
 }
 
 function drawKeep() {
-  // Drawn as one solid structure spanning the whole keep footprint, whatever
-  // size that is, rather than a cluster of separate towers.
-  const cx = isoX(KEEP_GX0, KEEP_GY0);              // the footprint is symmetric about the diagonal
+  // The White House, drawn in isometric: a low white neoclassical block with a
+  // balustraded roof, ranks of windows, and a columned portico with a pediment
+  // on the face turned toward the camera.
+  const cx = isoX(KEEP_GX0, KEEP_GY0);
   const baseY = isoY(KEEP_GX0 + KEEP_N - 1, KEEP_GY0 + KEEP_N - 1) + CELL_CORNERS[2][1];
   const topY = isoY(KEEP_GX0, KEEP_GY0) + CELL_CORNERS[0][1];
   const hw = CONFIG.board.keepPlan * UW / 2;
-
-  // Footprint.
-  ctx.fillStyle = "#6b6a63";
-  ctx.beginPath();
-  ctx.moveTo(cx, topY); ctx.lineTo(cx + hw, (topY + baseY) / 2);
-  ctx.lineTo(cx, baseY); ctx.lineTo(cx - hw, (topY + baseY) / 2);
-  ctx.closePath(); ctx.fill();
-
   const midY = (topY + baseY) / 2;
-  const wallH = (baseY - topY) * 0.44;              // proportional to the footprint
-  // Left and right walls.
-  ctx.fillStyle = "#807d74";
+  const wallH = (baseY - topY) * 0.60;   // three storeys: the facade is the building
+
+  const STONE_LIT = "#f4f2ec", STONE = "#e6e2d8", STONE_DARK = "#cdc8bb";
+  const SHADOW = "rgba(70,64,54,0.30)";
+  const GLASS = "#4a5666";
+
+  // Ground shadow.
+  ctx.fillStyle = "rgba(20,26,14,0.32)";
   ctx.beginPath();
-  ctx.moveTo(cx - hw, midY - wallH); ctx.lineTo(cx, topY - wallH);
-  ctx.lineTo(cx, topY); ctx.lineTo(cx - hw, midY);
-  ctx.closePath(); ctx.fill();
-  ctx.fillStyle = "#615f58";
-  ctx.beginPath();
-  ctx.moveTo(cx, topY - wallH); ctx.lineTo(cx + hw, midY - wallH);
-  ctx.lineTo(cx + hw, midY); ctx.lineTo(cx, topY);
+  ctx.moveTo(cx, topY + 6); ctx.lineTo(cx + hw + 6, midY + 6);
+  ctx.lineTo(cx, baseY + 8); ctx.lineTo(cx - hw - 6, midY + 6);
   ctx.closePath(); ctx.fill();
 
-  // Front faces, catching the light.
-  ctx.fillStyle = "#918e84";
+  // Plinth.
+  const plinth = wallH * 0.13;
+  ctx.fillStyle = STONE_DARK;
   ctx.beginPath();
-  ctx.moveTo(cx - hw, midY - wallH); ctx.lineTo(cx, baseY - wallH);
-  ctx.lineTo(cx, baseY); ctx.lineTo(cx - hw, midY);
-  ctx.closePath(); ctx.fill();
-  ctx.fillStyle = "#75726a";
-  ctx.beginPath();
-  ctx.moveTo(cx, baseY - wallH); ctx.lineTo(cx + hw, midY - wallH);
-  ctx.lineTo(cx + hw, midY); ctx.lineTo(cx, baseY);
+  ctx.moveTo(cx - hw, midY); ctx.lineTo(cx, baseY); ctx.lineTo(cx + hw, midY);
+  ctx.lineTo(cx + hw, midY + plinth); ctx.lineTo(cx, baseY + plinth); ctx.lineTo(cx - hw, midY + plinth);
   ctx.closePath(); ctx.fill();
 
-  // Roof.
-  ctx.fillStyle = "#9c998e";
+  // The two faces that catch the eye, left lit and right in shade.
+  const face = (x0, y0, x1, y1, fill) => {
+    ctx.beginPath();
+    ctx.moveTo(x0, y0 - wallH); ctx.lineTo(x1, y1 - wallH);
+    ctx.lineTo(x1, y1); ctx.lineTo(x0, y0);
+    ctx.closePath(); ctx.fillStyle = fill; ctx.fill();
+  };
+  face(cx - hw, midY, cx, baseY, STONE);        // near-left
+  face(cx, baseY, cx + hw, midY, STONE_DARK);   // near-right
+
+  // Windows, marching along each face in two storeys.
+  const winRow = (x0, y0, x1, y1, n, t, wsize) => {
+    for (let i = 0; i < n; i++) {
+      const f = (i + 0.5) / n;
+      const bx = lerp(x0, x1, f), by = lerp(y0, y1, f) - wallH * t;
+      ctx.fillStyle = GLASS;
+      ctx.fillRect(bx - wsize * 0.5, by - wsize * 1.25, wsize, wsize * 1.5);
+      ctx.fillStyle = "rgba(255,255,255,0.5)";
+      ctx.fillRect(bx - wsize * 0.5, by - wsize * 1.25, wsize, wsize * 0.28);
+    }
+  };
+  const wsz = Math.max(4, hw * 0.045);
+  winRow(cx - hw, midY, cx, baseY, 7, 0.62, wsz);
+  winRow(cx - hw, midY, cx, baseY, 7, 0.24, wsz);
+  ctx.globalAlpha = 0.72;
+  winRow(cx, baseY, cx + hw, midY, 7, 0.62, wsz);
+  winRow(cx, baseY, cx + hw, midY, 7, 0.24, wsz);
+  ctx.globalAlpha = 1;
+
+  // Roof, and the balustrade around its edge. Kept duller than the walls so the
+  // facade reads as the building rather than the roof plate.
+  ctx.fillStyle = "#d9d5c9";
   ctx.beginPath();
   ctx.moveTo(cx, topY - wallH); ctx.lineTo(cx + hw, midY - wallH);
   ctx.lineTo(cx, baseY - wallH); ctx.lineTo(cx - hw, midY - wallH);
   ctx.closePath(); ctx.fill();
 
-  // Crenellations around the roof edge.
-  const cren = hw * 0.038;
-  ctx.fillStyle = "#b0ada1";
-  const steps = CONFIG.board.keepPlan * 3;
-  for (let i = 0; i <= steps; i++) {
-    const t = i / steps;
-    const lx = lerp(cx - hw, cx, t), ly = lerp(midY - wallH, baseY - wallH, t);
-    ctx.fillRect(lx - cren, ly - cren * 2.6, cren * 2, cren * 2.8);
-    const rx = lerp(cx, cx + hw, t), ry = lerp(baseY - wallH, midY - wallH, t);
-    ctx.fillRect(rx - cren, ry - cren * 2.6, cren * 2, cren * 2.8);
-  }
-
-  // Gate on the near-left face.
-  const gw = hw * 0.22;
-  ctx.fillStyle = "#3b3128";
+  ctx.strokeStyle = SHADOW; ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.moveTo(cx - gw * 2, midY + gw * 0.2); ctx.lineTo(cx - gw * 2, midY - gw * 1.3);
-  ctx.quadraticCurveTo(cx - gw * 1.4, midY - gw * 1.9, cx - gw * 0.8, midY - gw);
-  ctx.lineTo(cx - gw * 0.8, midY + gw * 0.8);
+  ctx.moveTo(cx - hw, midY - wallH); ctx.lineTo(cx, baseY - wallH); ctx.lineTo(cx + hw, midY - wallH);
+  ctx.stroke();
+
+  // Chimneys and a shallow inset, so the roof is not a blank plateau.
+  ctx.fillStyle = "#cfcabd";
+  ctx.beginPath();
+  ctx.moveTo(cx, topY - wallH + 14); ctx.lineTo(cx + hw * 0.7, midY - wallH);
+  ctx.lineTo(cx, baseY - wallH - 14); ctx.lineTo(cx - hw * 0.7, midY - wallH);
   ctx.closePath(); ctx.fill();
 
-  // Flagpole, planted at the centre of the roof rather than its near edge.
+  const stackW = Math.max(3, hw * 0.03), stackH = Math.max(7, wallH * 0.16);
+  for (const [fx, fy] of [[-0.42, -0.16], [0.42, -0.16], [-0.16, 0.42], [0.16, 0.42]]) {
+    const bx = cx + (fx - fy) * hw, by = (midY - wallH) + (fx + fy) * (baseY - topY) / 2;
+    ctx.fillStyle = "#e2ded2";
+    ctx.fillRect(bx - stackW, by - stackH, stackW * 2, stackH);
+    ctx.fillStyle = "#b9b3a4";
+    ctx.fillRect(bx - stackW, by - stackH, stackW * 2, stackH * 0.22);
+  }
+
+  const post = Math.max(1.6, hw * 0.016), rail = Math.max(4, hw * 0.05);
+  ctx.fillStyle = STONE_LIT;
+  for (let i = 0; i <= 14; i++) {
+    const t = i / 14;
+    const lx = lerp(cx - hw, cx, t), ly = lerp(midY - wallH, baseY - wallH, t);
+    ctx.fillRect(lx - post, ly - rail, post * 2, rail);
+    const rx = lerp(cx, cx + hw, t), ry = lerp(baseY - wallH, midY - wallH, t);
+    ctx.fillStyle = STONE; ctx.fillRect(rx - post, ry - rail, post * 2, rail);
+    ctx.fillStyle = STONE_LIT;
+  }
+
+  // Portico on the near-left face: a projecting bay, columns, and a pediment.
+  const pw = hw * 0.30;                       // half-width along the face
+  const px = lerp(cx - hw, cx, 0.5), py = lerp(midY, baseY, 0.5);
+  const proj = hw * 0.16;                     // how far it steps forward
+  const ox = -proj * 0.86, oy = proj * 0.5;   // outward, along the face normal
+
+  // Steps.
+  ctx.fillStyle = STONE_DARK;
+  for (let i = 0; i < 3; i++) {
+    const g = (i + 1) / 3;
+    ctx.beginPath();
+    ctx.moveTo(px - pw * 1.05 + ox * g, py - pw * 0.52 + oy * g + plinth * 0.4 + i * 3);
+    ctx.lineTo(px + pw * 1.05 + ox * g, py + pw * 0.52 + oy * g + plinth * 0.4 + i * 3);
+    ctx.lineTo(px + pw * 1.05 + ox * g, py + pw * 0.52 + oy * g + plinth * 0.4 + i * 3 + 4);
+    ctx.lineTo(px - pw * 1.05 + ox * g, py - pw * 0.52 + oy * g + plinth * 0.4 + i * 3 + 4);
+    ctx.closePath(); ctx.fill();
+  }
+
+  // Recessed wall behind the columns.
+  ctx.fillStyle = STONE_DARK;
+  ctx.beginPath();
+  ctx.moveTo(px - pw, py - pw * 0.5 - wallH * 0.94);
+  ctx.lineTo(px + pw, py + pw * 0.5 - wallH * 0.94);
+  ctx.lineTo(px + pw, py + pw * 0.5);
+  ctx.lineTo(px - pw, py - pw * 0.5);
+  ctx.closePath(); ctx.fill();
+
+  // Doorway.
+  ctx.fillStyle = "#3b3128";
+  ctx.beginPath();
+  ctx.moveTo(px - pw * 0.16, py - pw * 0.08);
+  ctx.lineTo(px + pw * 0.16, py + pw * 0.08);
+  ctx.lineTo(px + pw * 0.16, py + pw * 0.08 - wallH * 0.42);
+  ctx.lineTo(px - pw * 0.16, py - pw * 0.08 - wallH * 0.42);
+  ctx.closePath(); ctx.fill();
+
+  // Six columns, standing proud of the wall.
+  const colW = Math.max(2.4, pw * 0.1), colH = wallH * 0.88;
+  for (let i = 0; i < 6; i++) {
+    const t = (i + 0.5) / 6;
+    const bx = lerp(px - pw * 0.92, px + pw * 0.92, t) + ox;
+    const by = lerp(py - pw * 0.46, py + pw * 0.46, t) + oy;
+    ctx.fillStyle = STONE_LIT;
+    ctx.fillRect(bx - colW, by - colH, colW * 2, colH);
+    ctx.fillStyle = "rgba(120,112,98,0.25)";
+    ctx.fillRect(bx + colW * 0.35, by - colH, colW * 0.65, colH);
+    ctx.fillStyle = STONE;                                   // capital and base
+    ctx.fillRect(bx - colW * 1.4, by - colH - colW * 0.9, colW * 2.8, colW * 0.9);
+    ctx.fillRect(bx - colW * 1.3, by - colW * 0.7, colW * 2.6, colW * 0.7);
+  }
+
+  // Entablature and pediment.
+  const entY = -colH - colW * 1.5;
+  ctx.fillStyle = STONE_LIT;
+  ctx.beginPath();
+  ctx.moveTo(px - pw * 1.05 + ox, py - pw * 0.52 + oy + entY);
+  ctx.lineTo(px + pw * 1.05 + ox, py + pw * 0.52 + oy + entY);
+  ctx.lineTo(px + pw * 1.05 + ox, py + pw * 0.52 + oy + entY + colW * 1.6);
+  ctx.lineTo(px - pw * 1.05 + ox, py - pw * 0.52 + oy + entY + colW * 1.6);
+  ctx.closePath(); ctx.fill();
+
+  const apexX = px + ox, apexY = py + oy + entY - pw * 0.62;
+  ctx.fillStyle = STONE_LIT;
+  ctx.beginPath();
+  ctx.moveTo(px - pw * 1.05 + ox, py - pw * 0.52 + oy + entY);
+  ctx.lineTo(apexX, apexY);
+  ctx.lineTo(px + pw * 1.05 + ox, py + pw * 0.52 + oy + entY);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = SHADOW; ctx.lineWidth = 1; ctx.stroke();
+
+  // Flagpole on the roof, with the Stars and Stripes.
   const roofY = midY - wallH;
-  const flagW = hw * 0.62, flagH = flagW * 0.53;
-  const poleH = flagH * 3.4;
-  const poleX = cx, poleTop = roofY - poleH, poleBot = roofY + hw * 0.08;
+  const flagW = hw * 0.44, flagH = flagW * 0.53;
+  const poleH = flagH * 3.2;
+  const poleX = cx, poleTop = roofY - poleH - hw * 0.30, poleBot = roofY - hw * 0.28;
   ctx.fillStyle = "#8f7d52"; ctx.fillRect(poleX, poleTop, 3, poleBot - poleTop);
   ctx.fillStyle = "#d8bd77"; ctx.fillRect(poleX, poleTop, 1.5, poleBot - poleTop);
   ctx.fillStyle = "#e8cf85";
@@ -2105,25 +2191,35 @@ function drawBuildHints() {
   }
 
   const def = BRICKS[tool];
-  const ok = canPlace(tool, gx, gy, h) && Game.gold >= def.cost;
+  const room = canPlace(tool, gx, gy, h);
+  const afford = Game.gold >= def.cost;
+  const ok = room && afford;
+
+  // Three states, not two. "Nothing more fits here" is normal — an archer post
+  // needs open sky, so the slot it sits in is full by design — and shading it
+  // red made the post itself look damaged. Red is now reserved for the one
+  // thing you can actually fix: not enough gold.
   if (ok) {
     ctx.globalAlpha = 0.55;
     Atlas.draw(ctx, tool, 0, 0, orient, sx - SPRITE_W / 2, sy - (lvl + 1) * ZH - SPRITE_CY);
     ctx.globalAlpha = 1;
   }
   brickPath(ctx, sx, sy - (ok ? lvl + 1 : lvl) * ZH, orient);
-  ctx.strokeStyle = ok ? "#8fe08a" : "#e0655a";
-  ctx.lineWidth = 3; ctx.stroke();
-  if (!ok) { ctx.fillStyle = "rgba(210,60,50,0.22)"; ctx.fill(); }
+  ctx.strokeStyle = ok ? "#8fe08a" : afford ? "rgba(226,232,240,0.45)" : "#e0655a";
+  ctx.lineWidth = ok ? 3 : 2;
+  ctx.stroke();
+  if (!room && !afford) { ctx.fillStyle = "rgba(210,60,50,0.18)"; ctx.fill(); }
 
   ctx.font = "600 17px system-ui, sans-serif";
   ctx.textAlign = "center"; ctx.textBaseline = "middle";
-  const label = isKeepTile(gx, gy) ? "keep" : lvl >= MAXH ? "max" : def.cost + "g";
+  const label = isKeepTile(gx, gy) ? "keep"
+    : !room ? (lvl >= MAXH ? "max" : "full")
+    : def.cost + "g";
   const tw = ctx.measureText(label).width + 14;
   const ly = sy - (ok ? lvl + 1 : lvl) * ZH - CELL_HH - 12;
   ctx.fillStyle = "rgba(12,14,20,0.82)";
   roundRect(ctx, sx - tw / 2, ly - 10, tw, 20, 5); ctx.fill();
-  ctx.fillStyle = ok ? "#f2cf6b" : "#e0655a";
+  ctx.fillStyle = !room ? "#aab2c0" : afford ? "#f2cf6b" : "#e0655a";
   ctx.fillText(label, sx, ly);
 }
 
@@ -2386,8 +2482,7 @@ function render(alpha) {
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   Viewport.applyTransform(sx, sy);
 
-  drawSky();
-  ctx.drawImage(Scenery.canvas, 0, 0, W, H);
+  drawBackdrop();
   drawScene(alpha);
   drawBuildHints();
 

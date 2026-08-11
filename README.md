@@ -32,6 +32,10 @@ Two versions live here:
 **Landscape only** — the kingdom needs the width. On a phone, turn the device sideways (if nothing
 happens, your rotation lock is on).
 
+The world is **shaped to your screen** rather than letterboxed into a fixed 16:9 box, so a wide phone
+gets a wider board instead of black bars — and the tiles grow to match. On a 2:1 phone that is ~40
+CSS px between tile centres, against ~30 on a 16:9 one.
+
 | | Touch | Desktop |
 |---|---|---|
 | Lay a brick | tap where you want it | click where you want it |
@@ -174,10 +178,13 @@ __game.computeFlow()    // the raw pathfinding field
 
 ## Known limits
 
-- Verified in a desktop browser at phone-landscape sizes (667×375 and 844×390) with synthesized
-  pointer events, and played on a real phone. Sustained framerate on a wide range of devices is still
-  unconfirmed. Tile spacing is ~30 CSS px, under the 44 px touch guideline but well up from where it
-  started.
+- Verified in a desktop browser at phone-landscape sizes (667×375, 844×390, 956×440) with synthesized
+  pointer events, and played on a real phone. Sustained framerate across devices is still unconfirmed.
+  Tile spacing is 30-40 CSS px depending on screen shape — under the 44 px touch guideline on narrow
+  phones, but close to it on wide ones.
+- The world's aspect is measured once at load. Rotating a phone shows the landscape prompt, and a
+  desktop window resized to a very different shape will letterbox rather than rebuild the board,
+  because rebuilding the grid mid-game would throw away the wall you built.
 - The keep sits on the board's near corner, so eight tiles touch it. Sealing that ring is still the
   strongest opening; the rest of the board earns its place as archer ground and as maze space.
 - Walls are deliberately flat at this distance (a full-height stack is only a little taller than a
