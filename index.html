@@ -133,7 +133,7 @@ const CONFIG = {
 
   ui: {
     hudH: 56,
-    barX: BAR_X, barW: BAR_W, btnH: 81, btnGap: 7,
+    barX: BAR_X, barW: BAR_W, btnH: 72, btnGap: 6,
     maxDpr: 2,
   },
 
@@ -796,6 +796,212 @@ function brickPath(c, cx, topCy, orient) {
   c.closePath();
 }
 
+
+/* ==========================================================================
+   Sound — everything synthesised, because the game is one file with no assets.
+   ========================================================================== */
+
+const Sound = {
+  ctx: null, master: null, musicBus: null, sfxBus: null,
+  on: true, started: false, mode: "calm", modeUntil: 0,
+  nextBeatAt: 0, beat: 0, lastSfx: 0, voices: 0,
+
+  load() {
+    try { this.on = localStorage.getItem("wallbuilder.sound") !== "off"; } catch (e) {}
+  },
+  save() {
+    try { localStorage.setItem("wallbuilder.sound", this.on ? "on" : "off"); } catch (e) {}
+  },
+
+  // Must be called from a real user gesture or the context stays suspended.
+  start() {
+    if (this.started) return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+
+    // iOS silences Web Audio when the ring switch is on unless the page declares
+    // itself playback audio. This is the switch that makes music survive it —
+    // which is also why there is a Sound button in the palette: the hardware
+    // mute no longer speaks for the user, so the game has to offer its own.
+    try {
+      if (navigator.audioSession) navigator.audioSession.type = "playback";
+    } catch (e) { /* not supported; audio simply follows the ring switch */ }
+
+    this.ctx = new AC();
+    this.master = this.ctx.createGain();
+    this.master.gain.value = this.on ? 1 : 0;
+    this.master.connect(this.ctx.destination);
+
+    this.musicBus = this.ctx.createGain();
+    this.musicBus.gain.value = 0.34;
+    this.musicBus.connect(this.master);
+
+    this.sfxBus = this.ctx.createGain();
+    this.sfxBus.gain.value = 0.85;
+    this.sfxBus.connect(this.master);
+
+    // One second of noise, reused for every percussive sound.
+    const n = this.ctx.sampleRate;
+    this.noise = this.ctx.createBuffer(1, n, n);
+    const d = this.noise.getChannelData(0);
+    for (let i = 0; i < n; i++) d[i] = Math.random() * 2 - 1;
+
+    this.started = true;
+    this.nextBeatAt = this.ctx.currentTime + 0.1;
+    this.beat = 0;
+    this.resume();
+  },
+
+  resume() { if (this.ctx && this.ctx.state === "suspended") this.ctx.resume(); },
+  toggle() {
+    this.on = !this.on;
+    this.save();
+    if (!this.started) { this.start(); return; }
+    this.resume();
+    const t = this.ctx.currentTime;
+    this.master.gain.cancelScheduledValues(t);
+    this.master.gain.setTargetAtTime(this.on ? 1 : 0, t, 0.05);
+  },
+
+  // --- voices ---------------------------------------------------------------
+
+  tone(at, freq, dur, o) {
+    if (this.voices > 24) return;
+    o = o || {};
+    const c = this.ctx, g = c.createGain(), f = c.createBiquadFilter();
+    const osc = c.createOscillator(), osc2 = c.createOscillator();
+    osc.type = osc2.type = o.type || "sawtooth";
+    osc.frequency.value = freq;
+    osc2.frequency.value = freq;
+    osc2.detune.value = o.detune == null ? 8 : o.detune;
+    f.type = "lowpass";
+    f.frequency.value = o.cutoff || 2200;
+    f.Q.value = o.q || 0.8;
+    const peak = o.gain == null ? 0.22 : o.gain;
+    g.gain.setValueAtTime(0.0001, at);
+    g.gain.exponentialRampToValueAtTime(peak, at + (o.attack || 0.012));
+    g.gain.exponentialRampToValueAtTime(0.0001, at + dur);
+    osc.connect(f); osc2.connect(f); f.connect(g);
+    g.connect(o.bus || this.musicBus);
+    osc.start(at); osc2.start(at);
+    osc.stop(at + dur + 0.02); osc2.stop(at + dur + 0.02);
+    this.voices += 2;
+    osc.onended = () => { this.voices -= 2; };
+  },
+
+  hit(at, dur, o) {
+    o = o || {};
+    const c = this.ctx, src = c.createBufferSource(), f = c.createBiquadFilter(), g = c.createGain();
+    src.buffer = this.noise;
+    f.type = o.filter || "bandpass";
+    f.frequency.value = o.freq || 1400;
+    f.Q.value = o.q || 1;
+    g.gain.setValueAtTime(o.gain == null ? 0.3 : o.gain, at);
+    g.gain.exponentialRampToValueAtTime(0.0001, at + dur);
+    src.connect(f); f.connect(g); g.connect(o.bus || this.musicBus);
+    src.start(at); src.stop(at + dur + 0.02);
+  },
+
+  thump(at, from, to, dur, gain, bus) {
+    const c = this.ctx, osc = c.createOscillator(), g = c.createGain();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(from, at);
+    osc.frequency.exponentialRampToValueAtTime(to, at + dur);
+    g.gain.setValueAtTime(gain, at);
+    g.gain.exponentialRampToValueAtTime(0.0001, at + dur);
+    osc.connect(g); g.connect(bus || this.sfxBus);
+    osc.start(at); osc.stop(at + dur + 0.02);
+  },
+
+  // --- effects --------------------------------------------------------------
+
+  // Masonry giving way: a crack, then rubble.
+  brickBreak() {
+    if (!this.ready()) return;
+    const t = this.ctx.currentTime;
+    this.hit(t, 0.16, { freq: 2000, q: 0.7, gain: 0.34, bus: this.sfxBus });
+    this.hit(t + 0.03, 0.34, { filter: "lowpass", freq: 700, gain: 0.26, bus: this.sfxBus });
+    this.thump(t, 150, 48, 0.24, 0.5);
+  },
+
+  // An invader going down: a short, dry impact rather than anything gory.
+  invaderDown() {
+    if (!this.ready()) return;
+    const t = this.ctx.currentTime;
+    this.hit(t, 0.1, { freq: 900, q: 1.4, gain: 0.2, bus: this.sfxBus });
+    this.tone(t, 320, 0.14, { type: "triangle", gain: 0.14, cutoff: 1400, bus: this.sfxBus });
+    this.tone(t + 0.05, 200, 0.16, { type: "triangle", gain: 0.11, cutoff: 900, bus: this.sfxBus });
+  },
+
+  // Something reached the keep.
+  breach() {
+    if (!this.ready()) return;
+    const t = this.ctx.currentTime;
+    this.thump(t, 190, 34, 0.6, 0.6);
+    this.hit(t, 0.5, { filter: "lowpass", freq: 420, gain: 0.34, bus: this.sfxBus });
+  },
+
+  ready() {
+    if (!this.started || !this.on || !this.ctx) return false;
+    if (this.ctx.currentTime - this.lastSfx < 0.035) return false;   // collapses fire in bursts
+    this.lastSfx = this.ctx.currentTime;
+    return true;
+  },
+
+  surge() { if (this.started) { this.mode = "intense"; this.modeUntil = Game.t + 14; } },
+
+  // --- the march ------------------------------------------------------------
+
+  // Scheduled ahead of time against the audio clock; scheduling on frames would
+  // put audible jitter in the beat.
+  update() {
+    if (!this.started || !this.on || !this.ctx) return;
+    if (Game.state !== "playing") { this.beat = 0; this.nextBeatAt = this.ctx.currentTime + 0.1; return; }
+    if (this.mode === "intense" && Game.t > this.modeUntil) this.mode = "calm";
+
+    const intense = this.mode === "intense";
+    const spb = 60 / (intense ? 152 : 112) / 2;          // eighth notes
+    const horizon = this.ctx.currentTime + 0.25;
+    let guard = 0;
+    while (this.nextBeatAt < horizon && guard++ < 32) {
+      this.scheduleBeat(this.nextBeatAt, this.beat, intense);
+      this.nextBeatAt += spb;
+      this.beat++;
+    }
+  },
+
+  scheduleBeat(at, i, intense) {
+    const N = (n) => 55 * Math.pow(2, n / 12);           // semitones above A1
+    const bar = Math.floor(i / 8) % 4, e = i % 8;        // eighths within a 4/4 bar
+
+    // A plain I-IV-V-I turn, the backbone of every march ever written.
+    const roots = intense ? [15, 13, 20, 18] : [15, 20, 22, 15];   // C, F, G, C
+    const root = roots[bar];
+
+    if (e % 2 === 0) {                                   // oom-pah bass
+      const n = (e === 0 || e === 4) ? root : root + 7;
+      this.tone(at, N(n - 12), 0.2, { type: "square", gain: 0.16, cutoff: 700 });
+    }
+    if (e === 2 || e === 6 || (intense && e % 2 === 1)) {  // snare
+      this.hit(at, intense ? 0.09 : 0.12, { freq: 1800, q: 0.9, gain: intense ? 0.2 : 0.15 });
+    }
+    if (intense && e % 4 === 0) this.thump(at, 130, 42, 0.22, 0.34, this.musicBus);
+
+    // Brass on the chord tones: fanfare shape when calm, driving stabs when not.
+    const calmLine = [0, 4, 7, 4, 12, 7, 4, 0];
+    const hotLine  = [0, 0, 3, 0, 7, 3, 0, -5];
+    const step = (intense ? hotLine : calmLine)[e];
+    if (intense || e % 2 === 0 || e === 5) {
+      this.tone(at, N(root + step), intense ? 0.16 : 0.26, {
+        type: "sawtooth", gain: intense ? 0.15 : 0.13,
+        cutoff: intense ? 2600 : 1900, detune: 10,
+      });
+      if (!intense && e === 0) this.tone(at, N(root + step + 7), 0.3, { gain: 0.07, cutoff: 1700 });
+    }
+  },
+};
+Sound.load();
+
 /* ==========================================================================
    Game state
    ========================================================================== */
@@ -1094,6 +1300,7 @@ function burstBrick(gx, gy, h, level, b) {
       life: 0, max: rand(0.5, 1.0), r: rand(5, 12) * FX, color: tint, spin: rand(-9, 9), rot: rand(0, 6.28) });
   }
   puff(x, y, 6, "#d8c9a6");
+  Sound.brickBreak();
   Game.shake = Math.min(9, Game.shake + 3.5);
 }
 function damageText(x, y, text, color, size) {
@@ -1163,6 +1370,7 @@ function hurtInvader(inv, amount) {
   inv.hitFlash = 1;
   if (inv.hp <= 0 && !inv.dead) {
     inv.dead = true;
+    Sound.invaderDown();
     Game.gold += inv.def.bounty;
     Game.stopped++;
     const sx = isoPX(inv.gx, inv.gy), sy = isoPY(inv.gx, inv.gy, inv.gz);
@@ -1188,6 +1396,7 @@ function reachKeep(inv) {
   Game.integrity -= inv.def.keepDmg;
   Game.breaches++;
   Game.flash = 1;
+  Sound.breach();
   Game.shake = Math.min(16, Game.shake + 7);
   const k = KEEP_TILES[0];
   damageText(isoX(k[0], k[1]), isoY(k[0], k[1]) - 110, "-" + inv.def.keepDmg, "#ff8a7a");
@@ -1531,7 +1740,7 @@ function updateSpawner(dt) {
   }
 }
 
-const showBanner = (text) => { Game.banner = { text, life: 0, max: 2.8 }; };
+const showBanner = (text) => { Game.banner = { text, life: 0, max: 2.8 }; Sound.surge(); };
 
 /* ==========================================================================
    Update
@@ -2355,18 +2564,21 @@ function drawBuildHints() {
 // peek. The column sits outside the board rectangle, so none of it covers
 // ground you can build on — the rest of the screen is board.
 function paletteLayout() {
-  const n = TOOLS.length + 2;
+  const n = TOOLS.length + 3;
   const { barX, barW, btnH, btnGap } = CONFIG.ui;
   const total = n * btnH + (n - 1) * btnGap;
   const y0 = (H - total) / 2;
   return Array.from({ length: n }, (_, i) => ({
     x: barX, w: barW, y: y0 + i * (btnH + btnGap), h: btnH,
     tool: i < TOOLS.length ? TOOLS[i] : null,
-    system: i === TOOLS.length ? "pause" : i === TOOLS.length + 1 ? "peek" : null,
+    system: i === TOOLS.length ? "pause"
+          : i === TOOLS.length + 1 ? "peek"
+          : i === TOOLS.length + 2 ? "sound" : null,
   }));
 }
 const PAUSE_BTN = paletteLayout().find(b => b.system === "pause");
 const PEEK_BTN  = paletteLayout().find(b => b.system === "peek");
+const SOUND_BTN = paletteLayout().find(b => b.system === "sound");
 
 // A compact pill floating over the board's far edge, rather than a full-width
 // bar. The bar cost ~10% of the screen height in reserved space; the far edge
@@ -2471,6 +2683,27 @@ function drawSideButtons() {
   ctx.beginPath(); ctx.ellipse(cxk, cyk, 14, 8.5, 0, 0, 6.284); ctx.stroke();
   ctx.fillStyle = Game.peek ? "#cfe9f7" : "#c3c9d4";
   ctx.beginPath(); ctx.arc(cxk, cyk, 4.5, 0, 6.284); ctx.fill();
+
+  // The game deliberately plays through the ring switch, so it owes you a mute
+  // of its own — this is the only way to silence it.
+  const sd = SOUND_BTN, cxs = sd.x + 30, cys = sd.y + sd.h / 2;
+  systemButton(sd, Sound.on, Sound.on ? "Sound" : "Muted");
+  const col = Sound.on ? "#cfe9f7" : "#8b93a1";
+  ctx.fillStyle = col;
+  ctx.beginPath();
+  ctx.moveTo(cxs - 11, cys - 4); ctx.lineTo(cxs - 5, cys - 4); ctx.lineTo(cxs + 2, cys - 11);
+  ctx.lineTo(cxs + 2, cys + 11); ctx.lineTo(cxs - 5, cys + 4); ctx.lineTo(cxs - 11, cys + 4);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = col; ctx.lineWidth = 2;
+  if (Sound.on) {
+    ctx.beginPath(); ctx.arc(cxs + 4, cys, 7, -0.9, 0.9); ctx.stroke();
+    ctx.beginPath(); ctx.arc(cxs + 4, cys, 12, -0.8, 0.8); ctx.stroke();
+  } else {
+    ctx.beginPath();
+    ctx.moveTo(cxs + 7, cys - 6); ctx.lineTo(cxs + 16, cys + 6);
+    ctx.moveTo(cxs + 16, cys - 6); ctx.lineTo(cxs + 7, cys + 6);
+    ctx.stroke();
+  }
 }
 
 // The palette runs down the right edge: isometric is starved of vertical room
@@ -2710,6 +2943,7 @@ function applyAlong(x0, y0, x1, y1) {
 
 function onDown(e) {
   e.preventDefault();
+  Sound.start(); Sound.resume();   // audio may only begin inside a user gesture
   if (Pointer.id !== null && e.pointerId !== Pointer.id) return;
   Pointer.id = e.pointerId;
   Pointer.coarse = e.pointerType !== "mouse";
@@ -2721,6 +2955,7 @@ function onDown(e) {
     if (inRect(p.x, p.y, bigBtnAt)) { resetGame(); Game.state = "playing"; }
     return;
   }
+  if (inRect(p.x, p.y, SOUND_BTN)) { Sound.toggle(); return; }
   if (inRect(p.x, p.y, PEEK_BTN)) { Game.peek = !Game.peek; return; }
   if (inRect(p.x, p.y, PAUSE_BTN)) {
     Game.state = Game.state === "playing" ? "paused" : "playing";
@@ -2777,6 +3012,8 @@ canvas.addEventListener("pointerleave", () => {
 canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 
 window.addEventListener("keydown", (e) => {
+  Sound.start();
+  if (e.key.toLowerCase() === "m") { Sound.toggle(); return; }
   if (e.key === " ") {
     e.preventDefault();
     if (Game.state === "playing") Game.state = "paused";
@@ -2800,7 +3037,10 @@ canvas.addEventListener("mousedown", (e) => {
 
 // Phones get interrupted; coming back to a fallen keep is a bad experience.
 const autoPause = () => { if (Game.state === "playing") Game.state = "paused"; };
-document.addEventListener("visibilitychange", () => { if (document.hidden) autoPause(); });
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) { autoPause(); if (Sound.ctx) Sound.ctx.suspend(); }
+  else Sound.resume();
+});
 window.addEventListener("blur", autoPause);
 window.addEventListener("resize", () => Viewport.resize());
 window.addEventListener("orientationchange", () => setTimeout(() => Viewport.resize(), 120));
@@ -2829,6 +3069,7 @@ function frame(now) {
   // rAF is rescheduled at the end, so an exception here would kill the loop
   // outright and freeze on a half-drawn frame with nothing in the console.
   // Report once and keep running, so a render bug is visible instead of fatal.
+  Sound.update();
   try {
     render(acc / STEP);
   } catch (err) {
@@ -2854,7 +3095,7 @@ window.__game = {
   heightAt, slotHeight, slotStack, slotPlan, stackHp, placeBrick, damageBrick,
   demolishTop, repairTop, pickTile, slotAt, orientAt,
   isoX, isoY, isoPX, isoPY, planX, planY, isKeepTile, spawnInvader, score, computeFlow,
-  refitWorldIfNeeded, paletteLayout,
+  refitWorldIfNeeded, paletteLayout, Sound,
   get PAUSE_BTN() { return PAUSE_BTN; },
   get PEEK_BTN() { return PEEK_BTN; },
   spawnRate, unlockedTypes,

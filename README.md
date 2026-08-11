@@ -73,6 +73,7 @@ ring is up. The highlighted diamond always shows the tile you will actually buil
 | Repair / Raze | palette | `R` / right-click |
 | See through walls | Peek, in the palette | `V` |
 | Pause | Pause, in the palette | `Space` |
+| Mute | Sound, in the palette | `M` |
 
 Everything you can press lives in the right-hand column, which sits outside the board — the rest of
 the screen is playable ground.
@@ -84,6 +85,24 @@ is decided by which side of the tile centre you touched.
 **Drag to lay a run.** Every slot the drag crosses gets built, with no cooldown between them, and
 the path between move events is filled in — so a fast swipe leaves a solid line rather than a dotted
 one. Gold is the only limit. This works the same on touch and mouse.
+
+## Sound
+
+A patriotic march plays under the siege, and switches to something faster and darker while a surge
+is on. Bricks give way with a crack and rubble; invaders go down with a dry impact; anything that
+reaches the keep lands a low boom.
+
+All of it is **synthesised at runtime** with the Web Audio API — no audio files, because the game is
+a single self-contained page. The march is scheduled against the audio clock rather than the frame
+loop, so the beat does not jitter when the frame rate does.
+
+**It plays through the iPhone ring switch.** That needs `navigator.audioSession.type = "playback"`
+(Safari 16.4+), and it is feature-detected — where it is unavailable, audio simply follows the
+switch as usual.
+
+Overriding that switch takes away the control you would normally use to silence a page, so the game
+provides its own: **Sound**, at the bottom of the palette, or `M`. The choice is remembered. Audio
+also cannot start until you touch the screen, which is a browser rule, not a choice.
 
 ## The idea
 
@@ -190,6 +209,8 @@ The dials that matter most:
   attackers that can reach it at once. Change it and `economy.income` has to follow. The building
   itself is drawn at a fraction of this (`PLOT` in `drawKeep`) with the remainder shown as grounds,
   so its size on screen can be tuned without moving the balance.
+- `Sound.musicBus` / `sfxBus` gain — the music/effects balance, currently 0.34 against 0.85 so the
+  march sits under the siege rather than over it.
 - `CONFIG.unitScale` / `fxScale` — how small invaders and debris are drawn. Invaders are drawn at
   nominal proportions and scaled as a whole, so line weights shrink with them. Hitboxes keep a
   world-space floor so arrows still connect.
@@ -221,6 +242,11 @@ __game.computeFlow()    // the raw pathfinding field
   pointer events, and played on a real phone. Sustained framerate across devices is still unconfirmed.
   Tile spacing is 33-43 CSS px depending on screen shape — essentially at the 44 px touch guideline on
   a wide phone, a little under it on a narrow one.
+- The ring-switch override is written against `navigator.audioSession` and feature-detected, but the
+  browser used for testing does not implement that API, so **only a real iPhone can confirm music
+  plays with the switch on.** Everything else about the audio was verified by measuring the output:
+  the march reaches RMS 0.053, effects layer to 0.17, the surge mix is louder than the calm one, and
+  muting drops output to exactly zero.
 - The world's aspect is measured once at load. Rotating a phone shows the landscape prompt, and a
   desktop window resized to a very different shape will letterbox rather than rebuild the board,
   because rebuilding the grid mid-game would throw away the wall you built.
