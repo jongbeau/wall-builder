@@ -45,11 +45,16 @@ and home indicator take their cut:
 | iPhone 13 mini | 712×354 | 210 | 32.6 px | none |
 | iPhone SE | 667×375 | 199 | 33.0 px | none |
 | iPhone 17 | 756×381 | 210 | 34.4 px | none |
-| iPhone 17 Pro Max | 838×419 | 200 | 43.2 px | none |
+| iPhone 17 Pro Max | 838×419 | 210 | 38.1 px | none |
 
 Every phone gets roughly the same number of tiles; a bigger screen buys bigger tiles rather than
 more of them, so the game plays the same everywhere. Palette buttons stay at or near the 44 px touch
-target throughout (43.3 px at the very smallest).
+target throughout (43.3 px at the very smallest, 51 px on a Pro Max).
+
+The proportions are measured at load. A phone is normally held in portrait, so the page usually
+loads that way and measures the screen stood up — which is the wrong shape. When you then rotate,
+the game reloads once with the right measurement. It can only do that before a game starts, so
+nothing is ever lost, and rotating mid-siege just pauses as usual.
 
 | | Touch | Desktop |
 |---|---|---|

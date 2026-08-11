@@ -407,6 +407,31 @@ const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d", { alpha: false });
 const safeProbe = document.getElementById("safe");
 
+// The world's proportions are measured once at load. If the page loaded in
+// PORTRAIT — which is how a phone is normally held — that measurement is the
+// screen stood up, its aspect falls below the clamp floor, and rotating to
+// landscape leaves the board ~11% too narrow.
+//
+// Rebuilding the grid in place would mean re-deriving every constant hanging
+// off the world size, so instead reload once with the right shape. This can
+// only fire before a game starts, so there is nothing to lose, and the reloaded
+// page measures a landscape box and agrees with itself.
+function refitWorldIfNeeded() {
+  if (Viewport.portrait) return;
+  if (Game.state !== "menu" && Game.state !== "over") return;
+
+  const box = availableBox();
+  const want = clamp(H * (box.w / Math.max(1, box.h)), 1280, 1920);
+  if (Math.abs(want - W) / W < 0.05) return;      // close enough; don't churn
+
+  try {
+    const stamp = String(Math.round(want));
+    if (sessionStorage.getItem("wallbuilder.refit") === stamp) return;
+    sessionStorage.setItem("wallbuilder.refit", stamp);
+  } catch (e) { /* private mode — the 5% test already rules out a loop */ }
+  location.reload();
+}
+
 const Viewport = {
   scale: 1, offX: 0, offY: 0, dpr: 1, vw: 0, vh: 0, portrait: false,
 
@@ -441,6 +466,10 @@ const Viewport = {
     canvas.height = Math.round(vh * this.dpr);
 
     Atlas.build(this.dpr);
+    // Straight off the resize, not the animation loop: a rotation fires resize
+    // even when frames are throttled, and waiting for a frame would leave the
+    // board wrong until the tab happened to tick.
+    refitWorldIfNeeded();
   },
 
   // Mobile browsers fire resize/orientationchange late, early, or not at all.
@@ -2749,6 +2778,7 @@ window.__game = {
   heightAt, slotHeight, slotStack, slotPlan, stackHp, placeBrick, damageBrick,
   demolishTop, repairTop, pickTile, slotAt, orientAt,
   isoX, isoY, isoPX, isoPY, planX, planY, isKeepTile, spawnInvader, score, computeFlow,
+  refitWorldIfNeeded,
   spawnRate, unlockedTypes,
   start() { resetGame(); Game.state = "playing"; refreshFlow(); },
   fastForward(seconds) { const n = Math.floor(seconds / STEP); for (let i = 0; i < n; i++) update(STEP); },
