@@ -63,8 +63,11 @@ nothing is ever lost, and rotating mid-siege just pauses as usual.
 | Pick which half of a tile | tap that side of it | click that side of it |
 | Choose a tool | palette on the right | palette, or `1`–`5` |
 | Repair / Raze | palette | `R` / right-click |
-| See through walls | PEEK button | `V` |
-| Pause | PAUSE button | `Space` |
+| See through walls | Peek, in the palette | `V` |
+| Pause | Pause, in the palette | `Space` |
+
+Everything you can press lives in the right-hand column, which sits outside the board — the rest of
+the screen is playable ground.
 
 The brick goes exactly where you touch — no offset, no confirm step. You aim at a **ground tile**
 and bricks stack automatically, so you never aim at a height. Which of the tile's two slots you get
@@ -102,13 +105,15 @@ Exact facing is impossible on any square grid — a tile straight out from the k
 at 45 degrees — so it snaps to the nearer axis. The board therefore changes coursing along the
 diagonal running out from the keep, the way real brickwork turns a corner.
 
-Three more rules do the rest:
+Two more rules do the rest:
 
 1. **Support.** Bricks stack; you cannot float them.
 2. **Collapse.** Break the bottom brick and everything above falls, taking damage on landing — so a
    tall stack can cascade.
-3. **Curing.** A fresh brick starts at a quarter strength and takes ~2.5s to set. You cannot patch a
-   breach instantly; you have to buy the time first.
+
+Bricks are at full strength the moment they are laid. They used to cure over a couple of seconds,
+but at this scale the only tell was a few pixels of tint, and an invisible rule is worse than no
+rule. Cost and the build cooldown still stop you conjuring a fortress mid-breach.
 
 Repairing is deliberately better value per gold than laying a fresh brick, so patching under
 pressure is the rewarded play.

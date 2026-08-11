@@ -133,7 +133,7 @@ const CONFIG = {
 
   ui: {
     hudH: 56,
-    barX: BAR_X, barW: BAR_W, btnH: 88, btnGap: 8,
+    barX: BAR_X, barW: BAR_W, btnH: 81, btnGap: 7,
     maxDpr: 2,
   },
 
@@ -151,8 +151,10 @@ const CONFIG = {
   },
 
   wall: {
-    cureTime: 2.5,
-    cureStart: 0.25,
+    // Bricks are at full strength the moment they are laid. They used to cure
+    // over a couple of seconds, but at this scale the tell was a few pixels of
+    // tint — an invisible rule is worse than no rule. Placement cost and the
+    // build cooldown still stop you conjuring a fortress mid-breach.
     fallDamage: 0.18,
     gravity: 2400,
   },
@@ -508,9 +510,14 @@ const Viewport = {
 
 const BRICK_TYPES = ["clay", "stone", "spike", "archer"];
 const STAGES = 3, VARIANTS = 3, ORIENTS = 2;
-const SPRITE_W = Math.ceil(SPAN * UW), SPRITE_H = Math.ceil(SPAN * UH + ZH);
+// Headroom above the block, because spikes and the archer stand proud of it.
+// Without it their tops overflowed the atlas cell and printed into the sprite
+// stored above — which is why plain stone grew little white spikes.
+const SPRITE_HEAD = Math.ceil(UH * 0.85);
+const SPRITE_BODY = Math.ceil(SPAN * UH + ZH);
+const SPRITE_W = Math.ceil(SPAN * UW), SPRITE_H = SPRITE_BODY + SPRITE_HEAD;
 // Where the brick's top-face centre sits inside its sprite.
-const SPRITE_CX = SPRITE_W / 2, SPRITE_CY = SPAN * UH / 2;
+const SPRITE_CX = SPRITE_W / 2, SPRITE_CY = SPRITE_HEAD + SPAN * UH / 2;
 
 // Project a point given in plan units (relative to the brick's centre) into
 // sprite-local screen coordinates.
@@ -541,6 +548,7 @@ const Atlas = {
         for (let st = 0; st < STAGES; st++) for (let va = 0; va < VARIANTS; va++) {
           c.save();
           c.translate((st * VARIANTS + va) * SPRITE_W, (idx * ORIENTS + or) * SPRITE_H);
+          c.beginPath(); c.rect(0, 0, SPRITE_W, SPRITE_H); c.clip();
           this.paint(c, type, st, va, or);
           c.restore();
         }
@@ -664,57 +672,84 @@ const Atlas = {
     if (type === "archer") this.paintArcher(c);
   },
 
-  // Laid out in tile units and projected, so they sit on the brick's top face
-  // whichever way it is turned.
+  // Three plain spikes down the middle of the brick's length. The earlier
+  // eight-blade version turned into grey mush at this size.
   paintSpikes(c, orient) {
-    const bw = UW * 0.055, bh = UH * 0.34;
-    c.fillStyle = "#c9cdd6";
-    c.strokeStyle = "rgba(20,20,26,0.6)";
-    c.lineWidth = 0.9;
-    // Blades in a double row along the brick's length.
     const { hx, hy } = BRICK_EXT[orient];
-    const along = [-0.62, -0.21, 0.21, 0.62], across = [-0.45, 0.45];
-    for (const a of along) for (const s of across) {
+    const w = UW * 0.055, h = UH * 0.52;
+    for (const t of [-0.55, 0, 0.55]) {
       const [x, y] = orient === 0
-        ? planToSprite(a * hx * 1.55, s * hy * 1.1)
-        : planToSprite(s * hx * 1.1, a * hy * 1.55);
+        ? planToSprite(t * hx * 1.25, 0)
+        : planToSprite(0, t * hy * 1.25);
+
       c.beginPath();
-      c.moveTo(x - bw, y + bw * 0.5); c.lineTo(x, y - bh); c.lineTo(x + bw, y + bw * 0.5);
-      c.closePath(); c.fill(); c.stroke();
-      c.fillStyle = "rgba(255,255,255,0.55)";
+      c.moveTo(x - w, y + w * 0.4);
+      c.lineTo(x, y - h);
+      c.lineTo(x + w, y + w * 0.4);
+      c.closePath();
+      c.fillStyle = "#b9bec9"; c.fill();
+      c.strokeStyle = "rgba(20,20,26,0.55)"; c.lineWidth = 1; c.stroke();
+
+      // Lit edge, so each spike reads as a solid point rather than a smudge.
       c.beginPath();
-      c.moveTo(x - bw, y + bw * 0.5); c.lineTo(x, y - bh); c.lineTo(x - bw * 0.2, y);
-      c.closePath(); c.fill();
-      c.fillStyle = "#c9cdd6";
+      c.moveTo(x - w, y + w * 0.4); c.lineTo(x, y - h); c.lineTo(x - w * 0.15, y + w * 0.1);
+      c.closePath();
+      c.fillStyle = "#eceff4"; c.fill();
     }
   },
 
+  // An archer standing on the brick, loosing arrows. Reads as a person at a
+  // glance, which a crenellated turret did not.
   paintArcher(c) {
-    // A little crenellated turret standing on the brick's top face.
     const [bx, by] = planToSprite(0, 0);
-    const w = UW * 0.16, body = UH * 0.55, roof = UH * 0.22;
+    const u = UH * 0.055;                    // one unit of figure
+    const groundY = by + u * 1.2;
 
     c.fillStyle = "rgba(0,0,0,0.22)";
-    c.beginPath(); c.ellipse(bx, by + UH * 0.08, w * 1.2, w * 0.6, 0, 0, 6.284); c.fill();
+    c.beginPath(); c.ellipse(bx, groundY, u * 3.4, u * 1.5, 0, 0, 6.284); c.fill();
 
-    c.fillStyle = "#8d8069";
+    // Bow: an arc out in front, with the string drawn back.
+    c.strokeStyle = "#8a6636"; c.lineWidth = u * 0.62; c.lineCap = "round";
     c.beginPath();
-    c.moveTo(bx - w, by); c.lineTo(bx, by + roof * 0.42); c.lineTo(bx + w, by);
-    c.lineTo(bx + w, by - body); c.lineTo(bx, by - body - roof * 0.42); c.lineTo(bx - w, by - body);
-    c.closePath(); c.fill();
-
-    c.fillStyle = "#a3957b";
+    c.arc(bx + u * 2.6, groundY - u * 4.4, u * 3.1, -1.15, 1.15);
+    c.stroke();
+    c.strokeStyle = "rgba(240,238,230,0.85)"; c.lineWidth = u * 0.22;
     c.beginPath();
-    c.moveTo(bx - w, by - body); c.lineTo(bx, by - body - roof * 0.42);
-    c.lineTo(bx + w, by - body); c.lineTo(bx, by - body + roof * 0.42);
-    c.closePath(); c.fill();
+    c.moveTo(bx + u * 3.9, groundY - u * 7.2);
+    c.lineTo(bx + u * 1.2, groundY - u * 4.4);
+    c.lineTo(bx + u * 3.9, groundY - u * 1.6);
+    c.stroke();
 
-    c.fillStyle = "#6f6553";
-    for (let i = -1; i <= 1; i++) {
-      c.fillRect(bx + i * w * 0.62 - w * 0.17, by - body - roof * 0.52 - Math.abs(i) * 1.6, w * 0.34, roof * 0.5);
-    }
-    c.fillStyle = "rgba(15,12,10,0.8)";
-    c.fillRect(bx - w * 0.15, by - body * 0.74, w * 0.3, body * 0.42);
+    // Nocked arrow.
+    c.strokeStyle = "#5a4632"; c.lineWidth = u * 0.34;
+    c.beginPath();
+    c.moveTo(bx + u * 0.7, groundY - u * 4.4);
+    c.lineTo(bx + u * 5.4, groundY - u * 4.4);
+    c.stroke();
+
+    // Legs, tunic, head.
+    c.strokeStyle = "#3f4a5c"; c.lineWidth = u * 0.8;
+    c.beginPath();
+    c.moveTo(bx - u * 1.1, groundY - u * 3.1); c.lineTo(bx - u * 1.7, groundY);
+    c.moveTo(bx - u * 0.1, groundY - u * 3.1); c.lineTo(bx + u * 0.9, groundY);
+    c.stroke();
+
+    c.fillStyle = "#4c6b8a";
+    roundRect(c, bx - u * 1.9, groundY - u * 6.6, u * 3.3, u * 3.8, u * 0.9);
+    c.fill();
+    c.fillStyle = "#6d90b3";
+    c.fillRect(bx - u * 1.9, groundY - u * 5.4, u * 3.3, u * 0.7);
+
+    // Drawing arm, reaching back to the string.
+    c.strokeStyle = "#d9b48c"; c.lineWidth = u * 0.72;
+    c.beginPath();
+    c.moveTo(bx + u * 0.2, groundY - u * 5.6); c.lineTo(bx + u * 1.3, groundY - u * 4.4);
+    c.stroke();
+
+    c.fillStyle = "#d9b48c";
+    c.beginPath(); c.arc(bx - u * 0.3, groundY - u * 7.6, u * 1.35, 0, 6.284); c.fill();
+    c.fillStyle = "#3f4a5c";                 // cap
+    c.beginPath(); c.arc(bx - u * 0.3, groundY - u * 7.9, u * 1.4, Math.PI, 0); c.fill();
   },
 
   draw(c, type, stage, variant, orient, x, y) {
@@ -853,7 +888,7 @@ function strongestSlot(gx, gy) {
 function makeBrick(type) {
   const def = BRICKS[type];
   return {
-    type, maxHp: def.hp, hp: def.hp * CONFIG.wall.cureStart, cure: 0,
+    type, maxHp: def.hp, hp: def.hp,
     variant: randInt(0, VARIANTS - 1), fallOffset: 0, fallVel: 0, hitFlash: 0,
     cd: type === "archer" ? Math.random() * BRICKS.archer.atkCd : 0,
   };
@@ -1038,7 +1073,7 @@ function burstBrick(gx, gy, h, level, b) {
       vx: rand(-170, 170) * FX * 1.6, vy: rand(-240, -40) * FX * 1.6,
       life: 0, max: rand(0.5, 1.0), r: rand(5, 12) * FX, color: tint, spin: rand(-9, 9), rot: rand(0, 6.28) });
   }
-  puff(x, y, 6, "#c9bda4");
+  puff(x, y, 6, "#d8c9a6");
   Game.shake = Math.min(9, Game.shake + 3.5);
 }
 function damageText(x, y, text, color, size) {
@@ -1423,7 +1458,7 @@ function updateArchers(dt) {
       const st = slotStack(gx, gy, h);
       for (let l = 0; l < st.length; l++) {
         const b = st[l];
-        if (b.type !== "archer" || b.cure < 1) continue;
+        if (b.type !== "archer") continue;
         b.cd -= dt;
         if (b.cd <= 0) b.cd = fireArrow(gx, gy, h, l) ? BRICKS.archer.atkCd : 0.2;
       }
@@ -1495,13 +1530,6 @@ function update(dt) {
   for (let i = 0; i < stacks.length; i++) {
     const st = stacks[i];
     for (const b of st) {
-      if (b.cure < 1) {
-        b.cure = Math.min(1, b.cure + dt / CONFIG.wall.cureTime);
-        const target = BRICKS[b.type].hp * lerp(CONFIG.wall.cureStart, 1, b.cure);
-        b.hp = Math.min(target, b.hp + BRICKS[b.type].hp * (1 - CONFIG.wall.cureStart) * dt / CONFIG.wall.cureTime);
-        b.maxHp = BRICKS[b.type].hp;
-        if (b.cure >= 1) flowDirty = true;
-      }
       if (b.fallOffset > 0) {
         b.fallVel += CONFIG.wall.gravity * dt;
         b.fallOffset -= b.fallVel * dt;
@@ -1649,7 +1677,7 @@ function drawGround() {
   const [T, R, B, L] = CELL_CORNERS;
   const skirt = 10;
 
-  ctx.fillStyle = "#2f3a24";
+  ctx.fillStyle = "#6b5836";
   ctx.beginPath();
   ctx.rect(RECT.x0, RECT.y0, RECT.x1 - RECT.x0, RECT.y1 - RECT.y0 + skirt);
   ctx.fill();
@@ -1658,7 +1686,7 @@ function drawGround() {
     if (!inBoard(gx, gy)) continue;
     const cx = isoX(gx, gy), cy = isoY(gx, gy);
     tileDiamond(cx, cy);
-    ctx.fillStyle = "#4e5c33";
+    ctx.fillStyle = "#b09a67";
     ctx.fill();
   }
 
@@ -1668,13 +1696,13 @@ function drawGround() {
     tileDiamond(cx, cy);
     ctx.fillStyle = (gx + gy) % 2 ? "rgba(255,255,255,0.030)" : "rgba(0,0,0,0.035)";
     ctx.fill();
-    ctx.strokeStyle = "rgba(20,28,14,0.22)";
+    ctx.strokeStyle = "rgba(84,66,32,0.20)";
     ctx.lineWidth = 1;
     ctx.stroke();
   }
 
   // A lip along the near edge so the plate reads as ground with thickness.
-  ctx.fillStyle = "rgba(18,24,12,0.55)";
+  ctx.fillStyle = "rgba(58,46,26,0.55)";
   ctx.fillRect(RECT.x0, RECT.y1 - 2, RECT.x1 - RECT.x0, skirt + 2);
 }
 
@@ -1708,11 +1736,11 @@ function drawKeep() {
     ctx.closePath();
     ctx.fillStyle = fill; ctx.fill();
   };
-  plot(1.0, "#5b6a3c");
-  plot(0.94, "#657544");
+  plot(1.0, "#5f6b3a");
+  plot(0.94, "#6d7a43");
   plot(0.80, "#cdc3a8");
-  plot(0.72, "#6d7d49");
-  ctx.strokeStyle = "rgba(40,52,26,0.5)"; ctx.lineWidth = 1.5;
+  plot(0.72, "#74824b");
+  ctx.strokeStyle = "rgba(52,44,22,0.5)"; ctx.lineWidth = 1.5;
   plot(0.94, "rgba(0,0,0,0)"); ctx.stroke();
 
   const STONE_LIT = "#f4f2ec", STONE = "#e6e2d8", STONE_DARK = "#cdc8bb";
@@ -1720,7 +1748,7 @@ function drawKeep() {
   const GLASS = "#4a5666";
 
   // Ground shadow.
-  ctx.fillStyle = "rgba(20,26,14,0.32)";
+  ctx.fillStyle = "rgba(72,56,30,0.32)";
   ctx.beginPath();
   ctx.moveTo(cx, topY + 6); ctx.lineTo(cx + hw + 6, midY + 6);
   ctx.lineTo(cx, baseY + 8); ctx.lineTo(cx - hw - 6, midY + 6);
@@ -1949,7 +1977,7 @@ function drawStack(gx, gy) {
   // wall looks walkable. This keeps the blocked footprint legible.
   if (!Game.peek && heightAt(gx, gy) > 0) {
     tileDiamond(cx, cy);
-    ctx.fillStyle = "rgba(24,30,16,0.30)";
+    ctx.fillStyle = "rgba(70,54,28,0.30)";
     ctx.fill();
   }
 
@@ -1966,19 +1994,11 @@ function drawStack(gx, gy) {
       const x = sx - SPRITE_W / 2;
       const y = topCy - SPRITE_CY;
 
-      const fade = Game.peek ? 0.3 : 1;
-      ctx.globalAlpha = (b.cure < 1 ? lerp(0.55, 1, b.cure) : 1) * fade;
+      ctx.globalAlpha = Game.peek ? 0.3 : 1;
       Atlas.draw(ctx, b.type, damageStage(b), b.variant, orient, x, y);
       ctx.globalAlpha = 1;
       if (Game.peek) continue;   // skip the overlays; peek is for seeing the ground
 
-      if (b.cure < 1) {
-        brickPath(ctx, sx, topCy, orient);
-        ctx.fillStyle = `rgba(90,140,190,${0.34 * (1 - b.cure)})`;
-        ctx.fill();
-        ctx.fillStyle = "rgba(255,255,255,0.8)";
-        ctx.fillRect(sx - 12, topCy - 1, 24 * b.cure, 2.5);
-      }
       if (b.hitFlash > 0) {
         brickPath(ctx, sx, topCy, orient);
         ctx.fillStyle = `rgba(255,250,240,${b.hitFlash * 0.34})`;
@@ -1989,7 +2009,7 @@ function drawStack(gx, gy) {
     // Health sliver for the base course, which is what everything attacks.
     const base = st[0];
     const f = base.hp / base.maxHp;
-    if (!Game.peek && f < 0.999 && base.cure >= 1) {
+    if (!Game.peek && f < 0.999) {
       const by = sy + CELL_HH * 0.5 - 4;
       ctx.fillStyle = "rgba(0,0,0,0.5)";
       ctx.fillRect(sx - 14, by, 28, 4);
@@ -2054,8 +2074,13 @@ function roundRect(c, x, y, w, h, r) {
   c.closePath();
 }
 
+// Most invaders carry nothing — they are a body in a tunic, told apart by
+// colour and silhouette. Only the two whose job depends on kit get a prop: the
+// climber's ladder and the sapper's charge. Weapons on everyone else just read
+// as clutter at this size.
 function drawFootman(inv, swing) {
   const d = inv.def, w = d.w, h = d.h;
+
   ctx.strokeStyle = "#2f2620"; ctx.lineWidth = 5; ctx.lineCap = "round";
   ctx.beginPath();
   ctx.moveTo(-3, -h * 0.34); ctx.lineTo(-3 + swing * 7, 0);
@@ -2067,16 +2092,20 @@ function drawFootman(inv, swing) {
   ctx.fillStyle = d.trim;
   ctx.fillRect(-w / 2, -h * 0.58, w, 4);
 
+  // Arms, swinging with the walk. Enough to read as a person in motion.
+  ctx.strokeStyle = d.body; ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(-w * 0.42, -h * 0.72); ctx.lineTo(-w * 0.52 - swing * 5, -h * 0.40);
+  ctx.moveTo(w * 0.42, -h * 0.72); ctx.lineTo(w * 0.52 + swing * 5, -h * 0.40);
+  ctx.stroke();
+
   ctx.fillStyle = "#d9b48c";
   ctx.beginPath(); ctx.arc(0, -h * 0.88, w * 0.32, 0, 6.284); ctx.fill();
   ctx.fillStyle = d.trim;
   ctx.beginPath(); ctx.arc(0, -h * 0.90, w * 0.34, Math.PI, 0); ctx.fill();
 
-  if (inv.type === "grunt") {
-    ctx.strokeStyle = "#5a4632"; ctx.lineWidth = 4;
-    ctx.beginPath(); ctx.moveTo(-w * 0.55, -h * 0.30); ctx.lineTo(-w * 0.75, -h * 0.85); ctx.stroke();
-    ctx.fillStyle = "#8a8a90"; ctx.fillRect(-w * 0.92, -h * 1.02, 18, 14);
-  } else if (inv.type === "climber") {
+  if (inv.type === "climber") {
+    // A ladder, because getting over the wall is the whole job.
     ctx.strokeStyle = "#7a5a34"; ctx.lineWidth = 3;
     ctx.beginPath();
     ctx.moveTo(-w * 0.1, -h * 1.02); ctx.lineTo(w * 0.95, -h * 0.62);
@@ -2091,23 +2120,23 @@ function drawFootman(inv, swing) {
       ctx.stroke();
     }
   } else if (inv.type === "sapper") {
+    // A charge with a lit fuse, which flares as it counts down.
     const pulse = inv.state === "fuse" ? (0.5 + Math.sin(inv.fuse * 40) * 0.5) : 0.35;
     ctx.fillStyle = "#2e2a26";
-    ctx.beginPath(); ctx.arc(-w * 0.55, -h * 0.5, 11, 0, 6.284); ctx.fill();
+    ctx.beginPath(); ctx.arc(-w * 0.62, -h * 0.46, 11, 0, 6.284); ctx.fill();
     ctx.fillStyle = `rgba(255,${140 + pulse * 100},60,${0.6 + pulse * 0.4})`;
-    ctx.beginPath(); ctx.arc(-w * 0.55, -h * 0.68, 4 + pulse * 3, 0, 6.284); ctx.fill();
+    ctx.beginPath(); ctx.arc(-w * 0.62, -h * 0.66, 4 + pulse * 3, 0, 6.284); ctx.fill();
   } else if (inv.type === "warlord") {
-    ctx.strokeStyle = "#d4b0ff"; ctx.lineWidth = 5;
-    ctx.beginPath(); ctx.moveTo(-w * 0.6, -h * 0.2); ctx.lineTo(-w * 0.85, -h * 0.95); ctx.stroke();
-    ctx.fillStyle = "#d4b0ff";
-    ctx.beginPath();
-    ctx.moveTo(-w * 0.34, -h * 0.98); ctx.lineTo(-w * 0.6, -h * 1.2); ctx.lineTo(-w * 0.2, -h * 1.03);
-    ctx.moveTo(w * 0.34, -h * 0.98); ctx.lineTo(w * 0.6, -h * 1.2); ctx.lineTo(w * 0.2, -h * 1.03);
-    ctx.fill();
+    // No weapon: a cape and a horned helm carry the rank on their own.
     ctx.fillStyle = "rgba(90,60,140,0.85)";
     ctx.beginPath();
     ctx.moveTo(w * 0.35, -h * 0.78); ctx.lineTo(w * 0.85, -h * 0.1); ctx.lineTo(w * 0.2, -h * 0.2);
     ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "#d4b0ff";
+    ctx.beginPath();
+    ctx.moveTo(-w * 0.34, -h * 0.98); ctx.lineTo(-w * 0.62, -h * 1.22); ctx.lineTo(-w * 0.2, -h * 1.03);
+    ctx.moveTo(w * 0.34, -h * 0.98); ctx.lineTo(w * 0.62, -h * 1.22); ctx.lineTo(w * 0.2, -h * 1.03);
+    ctx.fill();
   }
 }
 
@@ -2295,11 +2324,22 @@ function drawBuildHints() {
 
 /* ---- HUD and toolbar ----------------------------------------------------- */
 
-// The board is a rhombus, so the screen's top corners are dead space even when
-// it spans the full width. Parked there rather than in the 56px HUD strip,
-// which is too short to hold a 44 CSS px touch target.
-const PAUSE_BTN = { x: 1004, y: 62, w: 122, h: 84 };
-const PEEK_BTN  = { x: 1004, y: 154, w: 122, h: 84 };
+// Eight rows down the right-hand column: the six build tools, then pause and
+// peek. The column sits outside the board rectangle, so none of it covers
+// ground you can build on — the rest of the screen is board.
+function paletteLayout() {
+  const n = TOOLS.length + 2;
+  const { barX, barW, btnH, btnGap } = CONFIG.ui;
+  const total = n * btnH + (n - 1) * btnGap;
+  const y0 = (H - total) / 2;
+  return Array.from({ length: n }, (_, i) => ({
+    x: barX, w: barW, y: y0 + i * (btnH + btnGap), h: btnH,
+    tool: i < TOOLS.length ? TOOLS[i] : null,
+    system: i === TOOLS.length ? "pause" : i === TOOLS.length + 1 ? "peek" : null,
+  }));
+}
+const PAUSE_BTN = paletteLayout().find(b => b.system === "pause");
+const PEEK_BTN  = paletteLayout().find(b => b.system === "peek");
 
 // A compact pill floating over the board's far edge, rather than a full-width
 // bar. The bar cost ~10% of the screen height in reserved space; the far edge
@@ -2371,59 +2411,51 @@ function drawHud() {
   drawSideButtons();
 }
 
-function topButton(r, active, label) {
-  ctx.fillStyle = active ? "rgba(95,169,216,0.30)" : "rgba(10,12,18,0.62)";
-  roundRect(ctx, r.x, r.y, r.w, r.h, 12); ctx.fill();
-  ctx.strokeStyle = active ? "#7fc4ea" : "rgba(255,255,255,0.14)";
+function systemButton(r, active, label) {
+  ctx.fillStyle = active ? "rgba(95,169,216,0.26)" : "rgba(255,255,255,0.06)";
+  roundRect(ctx, r.x, r.y, r.w, r.h, 10); ctx.fill();
+  ctx.strokeStyle = active ? "#7fc4ea" : "rgba(255,255,255,0.12)";
   ctx.lineWidth = active ? 3 : 1.5;
-  roundRect(ctx, r.x, r.y, r.w, r.h, 12); ctx.stroke();
+  roundRect(ctx, r.x, r.y, r.w, r.h, 10); ctx.stroke();
   ctx.fillStyle = active ? "#cfe9f7" : "#c3c9d4";
-  ctx.font = "700 17px system-ui, sans-serif";
-  ctx.textAlign = "center"; ctx.textBaseline = "middle";
-  ctx.fillText(label, r.x + r.w / 2, r.y + r.h - 17);
+  ctx.font = "600 17px system-ui, sans-serif";
+  ctx.textAlign = "left"; ctx.textBaseline = "middle";
+  ctx.fillText(label, r.x + 58, r.y + r.h / 2 + 1);
 }
 
 function drawSideButtons() {
-  const p = PAUSE_BTN, cxp = p.x + p.w / 2, cyp = p.y + p.h * 0.42;
+  const p = PAUSE_BTN, cxp = p.x + 30, cyp = p.y + p.h / 2;
   const paused = Game.state === "paused";
-  topButton(p, paused, paused ? "RESUME" : "PAUSE");
+  systemButton(p, paused, paused ? "Resume" : "Pause");
   ctx.fillStyle = paused ? "#cfe9f7" : "#e9eef5";
   if (paused) {
     ctx.beginPath();
-    ctx.moveTo(cxp - 10, cyp - 14); ctx.lineTo(cxp + 14, cyp); ctx.lineTo(cxp - 10, cyp + 14);
+    ctx.moveTo(cxp - 8, cyp - 11); ctx.lineTo(cxp + 12, cyp); ctx.lineTo(cxp - 8, cyp + 11);
     ctx.closePath(); ctx.fill();
   } else {
-    ctx.fillRect(cxp - 12, cyp - 14, 8, 28);
-    ctx.fillRect(cxp + 4, cyp - 14, 8, 28);
+    ctx.fillRect(cxp - 10, cyp - 11, 7, 22);
+    ctx.fillRect(cxp + 3, cyp - 11, 7, 22);
   }
 
-  const k = PEEK_BTN, cxk = k.x + k.w / 2, cyk = k.y + k.h * 0.42;
-  topButton(k, Game.peek, "PEEK");
+  const k = PEEK_BTN, cxk = k.x + 30, cyk = k.y + k.h / 2;
+  systemButton(k, Game.peek, "Peek");
   ctx.strokeStyle = Game.peek ? "#cfe9f7" : "#c3c9d4";
-  ctx.lineWidth = 2.6;
-  ctx.beginPath(); ctx.ellipse(cxk, cyk, 17, 10.5, 0, 0, 6.284); ctx.stroke();
+  ctx.lineWidth = 2.4;
+  ctx.beginPath(); ctx.ellipse(cxk, cyk, 14, 8.5, 0, 0, 6.284); ctx.stroke();
   ctx.fillStyle = Game.peek ? "#cfe9f7" : "#c3c9d4";
-  ctx.beginPath(); ctx.arc(cxk, cyk, 5.5, 0, 6.284); ctx.fill();
+  ctx.beginPath(); ctx.arc(cxk, cyk, 4.5, 0, 6.284); ctx.fill();
 }
 
 // The palette runs down the right edge: isometric is starved of vertical room
 // and flush with horizontal, so a bottom bar would cost board height we can't
 // spare.
-function toolbarLayout() {
-  const n = TOOLS.length;
-  const total = n * CONFIG.ui.btnH + (n - 1) * CONFIG.ui.btnGap;
-  const y0 = 12 + (H - 24 - total) / 2;
-  return TOOLS.map((t, i) => ({
-    tool: t, x: CONFIG.ui.barX, w: CONFIG.ui.barW,
-    y: y0 + i * (CONFIG.ui.btnH + CONFIG.ui.btnGap), h: CONFIG.ui.btnH,
-  }));
-}
+const toolbarLayout = () => paletteLayout().filter(b => b.tool);
 
 function drawToolbar() {
   ctx.fillStyle = "rgba(10,12,18,0.72)";
-  ctx.fillRect(CONFIG.ui.barX - 12, CONFIG.ui.hudH, W - CONFIG.ui.barX + 12, H - CONFIG.ui.hudH);
+  ctx.fillRect(CONFIG.ui.barX - 12, 0, W - CONFIG.ui.barX + 12, H);
   ctx.fillStyle = "rgba(255,255,255,0.07)";
-  ctx.fillRect(CONFIG.ui.barX - 12, CONFIG.ui.hudH, 2, H - CONFIG.ui.hudH);
+  ctx.fillRect(CONFIG.ui.barX - 12, 0, 2, H);
 
   for (const b of toolbarLayout()) {
     const id = b.tool.id;
@@ -2441,7 +2473,7 @@ function drawToolbar() {
     const ix = b.x + 34, iy = b.y + b.h / 2;
     if (BRICKS[id]) {
       // Scaled to a readable icon regardless of how small board tiles get.
-      const s = 46 / SPRITE_H;
+      const s = 46 / SPRITE_BODY;
       ctx.save();
       ctx.translate(ix, iy + SPRITE_H * s * 0.3);
       ctx.scale(s, s);
@@ -2778,7 +2810,9 @@ window.__game = {
   heightAt, slotHeight, slotStack, slotPlan, stackHp, placeBrick, damageBrick,
   demolishTop, repairTop, pickTile, slotAt, orientAt,
   isoX, isoY, isoPX, isoPY, planX, planY, isKeepTile, spawnInvader, score, computeFlow,
-  refitWorldIfNeeded,
+  refitWorldIfNeeded, paletteLayout,
+  get PAUSE_BTN() { return PAUSE_BTN; },
+  get PEEK_BTN() { return PEEK_BTN; },
   spawnRate, unlockedTypes,
   start() { resetGame(); Game.state = "playing"; refreshFlow(); },
   fastForward(seconds) { const n = Math.floor(seconds / STEP); for (let i = 0; i < n; i++) update(STEP); },
