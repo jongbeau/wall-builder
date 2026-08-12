@@ -173,6 +173,7 @@ Each type gets its own stretch of the siege before the next arrives:
 | Ram | 3:15 |
 | Catapult | 4:40 |
 | Warlord | 6:40 |
+| **Titan** | 3:30, then every 2:15 |
 
 | Unit | What it does | What beats it |
 |---|---|---|
@@ -182,8 +183,16 @@ Each type gets its own stretch of the siege before the next arrives:
 | **Ram** | Slow, very tough, enormous damage | Depth, spikes, focused fire |
 | **Catapult** | Halts out of reach and lobs rocks at your **tallest** stack | Kill it — or don't put archers on your high ground |
 | **Warlord** | Speeds up and strengthens everything near it | Focused fire |
+| **Titan** | Armoured elite on its own timer. Its maul carries into the tiles either side, so it opens a *wide* breach rather than a hole | Depth, spikes, and accepting that some wall is going to fall |
 
 Note the tension: 4-high walls stop climbers, but tall stacks are exactly what catapults aim at.
+
+The titan is the one unit that shows a health bar. Every other invader shows none — a bar over each
+of forty units was noise, and the titan is the only one whose remaining health you plan around.
+
+The titan also carries **armour**: a flat reduction on every hit it takes, floored at a quarter of
+the incoming damage so it is never immune. That exists because massed archers were the real problem
+(see Tuning), and armour is what stops a wall of cheap chip damage from deleting the encounter.
 
 Only **two invaders** can attack one tile at once — the rest queue. That is what makes a wall worth
 building, and why a breach is sudden: the moment a tile falls, the queue pours through.
@@ -234,8 +243,35 @@ The dials that matter most:
   the siege builds; `hpRampPer` and `combat.dmgRampPer` set how fast invaders inflate. Lower growth
   and longer ramp periods make a gentler game without ever capping the escalation.
 
-For reference, a bot that seals the 8-tile ring and builds archer posts survives about **400
-seconds** with 250–330 kills. That is the floor to beat.
+### What actually controls difficulty
+
+Measured, not guessed. A bot that seals the ring around the keep, builds archer posts and repairs the
+worst brick was run repeatedly against each dial:
+
+| Change | Bot survival |
+|---|---|
+| Baseline (income 36, archer 55, no titan) | **473s** |
+| Income 36 → 18 (halved) | 689s → 595s, non-monotonic |
+| Archer 55 → 140 | 637s → 621s |
+| Archer 55 → 190 | 468s — but only by pricing archers out entirely |
+| Income 26 + archer 110, no titan | **400s** |
+| Income 26 + archer 110 + titan | **305s** |
+
+Two things this settles:
+
+- **Gold is not the difficulty lever.** Halving income moved survival ~14%, and the curve is not even
+  monotonic — 26 outscored 30. Archer kills fund more archers, so the economy self-corrects.
+- **Archer price barely helps either.** Tripling it changed survival 2%; the bot just took longer to
+  reach the same 32 posts. Only a price high enough to remove archers from the game did anything,
+  which is not a difficulty curve, it is a deletion.
+
+What works is a threat that punishes a *finished* defence rather than a slow one — hence the titan.
+Its first version did nothing at all (473s → 477s) for two measurable reasons, both worth recording:
+it was so slow that a titan spawned at 350s was **still walking** when the run ended 34s later, and
+32 massed archers melted its 4,700 HP the moment it came into range. Speed and armour fixed both.
+
+Current floor to beat: **305 seconds**, 1–2 titans per run, every one of them killable — 6 of 6
+titans died in testing, each after 24–49 seconds of wrecking wall.
 
 ## Debugging
 

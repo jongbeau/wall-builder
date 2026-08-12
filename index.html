@@ -143,7 +143,7 @@ const CONFIG = {
     // attackers that can reach it at once — income has to follow or the opening
     // seal eats every coin and no archers ever get built.
     startGold: 900,
-    income: 36,
+    income: 26,
     buildCooldown: 0.14,
     refund: 0.5,
     repairCost: 6,
@@ -188,6 +188,12 @@ const CONFIG = {
     hpRampPer: 420,       // +100% invader HP every N seconds
     graceTime: 20,
     flankUnlock: 240,     // the third front opens here
+    // Titans. Gold and archer prices turned out to be weak difficulty dials —
+    // a saturated archer ring simply stops losing — so the escalation needs
+    // something that punishes standing still rather than something that slows
+    // the build.
+    titanFirst: 210,
+    titanEvery: 135,
   },
 
   fx: { maxParticles: 240, maxParticlesTouch: 140 },
@@ -198,7 +204,7 @@ const BRICKS = {
   clay:   { name: "Clay",   cost: 8,  hp: 60,  reflect: 0,    tint: "#b0603c" },
   stone:  { name: "Stone",  cost: 18, hp: 200, reflect: 0,    tint: "#8b8b85" },
   spike:  { name: "Spike",  cost: 30, hp: 130, reflect: 0.45, tint: "#6d6d77" },
-  archer: { name: "Archer", cost: 55, hp: 70,  reflect: 0,    tint: "#9c8f76",
+  archer: { name: "Archer", cost: 110, hp: 70,  reflect: 0,    tint: "#9c8f76",
             range: 3.4, atkCd: 0.9, dmg: 22 },   // range in tiles
 };
 
@@ -210,6 +216,10 @@ const INVADERS = {
   sapper:   { hp: 40,  speed: 2.10, dmg: 170, atkCd: 0.60, bounty: 9,  keepDmg: 5,  w: 24, h: 42, unlock: 125, weight: 0.60, body: "#a8443c", trim: "#ffd08a", fuse: 0.65 },
   ram:      { hp: 420, speed: 0.55, dmg: 70,  atkCd: 1.60, bounty: 22, keepDmg: 20, w: 60, h: 50, unlock: 195, weight: 0.45, body: "#6b6259", trim: "#3d3833" },
   catapult: { hp: 180, speed: 0.66, dmg: 90,  atkCd: 4.00, bounty: 26, keepDmg: 15, w: 60, h: 56, unlock: 280, weight: 0.35, body: "#7a6a4a", trim: "#4a3f2c", standoff: 2.6 },
+  // Spawned on its own timer, never by the weighted roll — hence unlock/weight
+  // putting it outside the normal pool. Slow, enormously tough, and its swing
+  // carries into the tiles either side, so a static wall cannot just soak it.
+  titan:    { hp: 3000, speed: 0.62, dmg: 200, atkCd: 1.9, bounty: 240, keepDmg: 45, w: 60, h: 88, unlock: 1e9, weight: 0, body: "#4a4054", trim: "#e0b45a", showHealth: true, smash: 0.5, armor: 14 },
   warlord:  { hp: 700, speed: 0.85, dmg: 45,  atkCd: 1.00, bounty: 60, keepDmg: 25, w: 34, h: 58, unlock: 400, weight: 0.14, body: "#57407a", trim: "#d4b0ff", auraR: 2.2, auraBuff: 0.28 },
 };
 
@@ -1093,7 +1103,7 @@ Sound.load();
 const Game = {
   state: "menu", t: 0, gold: 0, integrity: 0, stopped: 0, breaches: 0, best: 0,
   tool: "clay", buildCd: 0, shake: 0, banner: null, nextSurge: 0, spawnAcc: 0,
-  flash: 0, flankOpen: false, peek: false, flowTimer: 0,
+  flash: 0, flankOpen: false, peek: false, flowTimer: 0, nextTitan: 0,
 };
 
 // One stack per ground tile, bottom-first. Compaction keeps every stack
@@ -1155,6 +1165,7 @@ function resetGame() {
   Game.tool = "clay"; Game.buildCd = 0; Game.shake = 0;
   Game.banner = null; Game.nextSurge = CONFIG.spawn.surgeEvery;
   Game.spawnAcc = 0; Game.flash = 0; Game.flankOpen = false; Game.peek = false;
+  Game.nextTitan = CONFIG.spawn.titanFirst;
   lastDenied = -1;
   flowDirty = true;
 }
@@ -1449,7 +1460,10 @@ function spawnInvader(type, front) {
   invaders.push(inv);
 }
 
+const ARMOR_FLOOR = 0.25;   // even the titan always takes a quarter of a hit
+
 function hurtInvader(inv, amount) {
+  if (inv.def.armor) amount = Math.max(amount * ARMOR_FLOOR, amount - inv.def.armor);
   inv.hp -= amount;
   inv.hitFlash = 1;
   if (inv.hp <= 0 && !inv.dead) {
@@ -1640,6 +1654,19 @@ function stepAttack(inv, dt) {
     damageBrick(tgx, tgy, 0, damageOf(inv), inv);   // always the base course
     puff(isoX(tgx, tgy), isoY(tgx, tgy) - ZH * 0.4, 3, "#cdbfa4");
     if (inv.type === "ram") Game.shake = Math.min(14, Game.shake + 5);
+
+    // A titan's swing spills into the tiles either side, so a single line of
+    // wall cannot absorb it the way it absorbs everything else.
+    if (inv.def.smash) {
+      for (const [dx, dy] of DIRS) {
+        const nx = tgx + dx, ny = tgy + dy;
+        if (!inBoard(nx, ny) || isKeepTile(nx, ny)) continue;
+        for (let sl = 0; sl < SLOTS; sl++) {
+          if (slotHeight(nx, ny, sl)) damageBrick(nx, ny, 0, damageOf(inv) * inv.def.smash, inv, sl);
+        }
+      }
+      Game.shake = Math.min(20, Game.shake + 9);
+    }
   }
 }
 
@@ -1810,6 +1837,13 @@ function updateSpawner(dt) {
   Game.spawnAcc += spawnRate() * dt;
   while (Game.spawnAcc >= 1) { Game.spawnAcc -= 1; spawnInvader(rollType()); }
 
+  if (Game.t >= Game.nextTitan) {
+    Game.nextTitan += CONFIG.spawn.titanEvery;
+    const n = 1 + Math.floor(Game.t / 540);          // they start arriving in pairs late on
+    for (let i = 0; i < n; i++) spawnInvader("titan");
+    showBanner(n > 1 ? "TITANS APPROACH" : "A TITAN APPROACHES", 2);
+  }
+
   if (Game.t >= Game.nextSurge) {
     Game.nextSurge += CONFIG.spawn.surgeEvery;
     const types = unlockedTypes();
@@ -1824,7 +1858,14 @@ function updateSpawner(dt) {
   }
 }
 
-const showBanner = (text) => { Game.banner = { text, life: 0, max: 2.8 }; Sound.surge(); };
+// A titan arriving can land on the same tick as a surge, and whichever banner
+// is set last wins — which meant the titan warning was being silently replaced.
+// Higher-priority banners hold the screen against lower-priority ones.
+const showBanner = (text, priority = 0) => {
+  if (Game.banner && Game.banner.priority > priority && Game.banner.life < Game.banner.max * 0.6) return;
+  Game.banner = { text, life: 0, max: 2.8, priority };
+  Sound.surge();
+};
 
 /* ==========================================================================
    Update
@@ -2358,6 +2399,7 @@ function drawInvader(inv, alpha) {
 
   if (inv.type === "ram") drawRam(inv);
   else if (inv.type === "catapult") drawCatapult(inv);
+  else if (inv.type === "titan") drawTitan(inv, swing);
   else drawFootman(inv, swing);
 
   if (inv.hitFlash > 0) {
@@ -2368,14 +2410,16 @@ function drawInvader(inv, alpha) {
   }
   ctx.restore();
 
-  if (inv.hp < inv.maxHp) {
-    const bw = Math.max(13, d.w * US);
+  // Only the titan carries a bar. A bar over every invader was noise, and the
+  // one unit whose remaining health you actually plan around is the titan.
+  if (d.showHealth && inv.hp < inv.maxHp) {
+    const bw = Math.max(30, d.w * US * 1.6);
     const f = clamp(inv.hp / inv.maxHp, 0, 1);
-    const by = y - d.h * US - 7;
-    ctx.fillStyle = "rgba(0,0,0,0.55)";
-    ctx.fillRect(x - bw / 2, by, bw, 3);
+    const by = y - d.h * US * 1.34 - 8;
+    ctx.fillStyle = "rgba(0,0,0,0.65)";
+    ctx.fillRect(x - bw / 2 - 1, by - 1, bw + 2, 6);
     ctx.fillStyle = f > 0.5 ? "#7fc46a" : f > 0.25 ? "#e0bb4c" : "#d9614c";
-    ctx.fillRect(x - bw / 2, by, bw * f, 3);
+    ctx.fillRect(x - bw / 2, by, bw * f, 4);
   }
 }
 
@@ -2453,6 +2497,57 @@ function drawFootman(inv, swing) {
     ctx.moveTo(w * 0.34, -h * 0.98); ctx.lineTo(w * 0.62, -h * 1.22); ctx.lineTo(w * 0.2, -h * 1.03);
     ctx.fill();
   }
+}
+
+// The titan: armoured, twice the size of anything else, and carrying the one
+// prop that explains what it does to your wall. Line weights are derived from
+// w so every part of it scales together.
+function drawTitan(inv, swing) {
+  const d = inv.def, w = d.w, h = d.h;
+  const lw = w * 0.17;
+  const winding = inv.state === "attack" ? Math.max(0, Math.sin(inv.cd * 3.2)) : 0;
+
+  // Legs.
+  ctx.strokeStyle = "#241f2c"; ctx.lineWidth = lw; ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(-w * 0.16, -h * 0.34); ctx.lineTo(-w * 0.20 + swing * w * 0.14, -lw * 0.4);
+  ctx.moveTo(w * 0.16, -h * 0.34);  ctx.lineTo(w * 0.20 - swing * w * 0.14, -lw * 0.4);
+  ctx.stroke();
+
+  // Torso, belt, pauldrons.
+  ctx.fillStyle = d.body;
+  roundRect(ctx, -w * 0.42, -h * 0.80, w * 0.84, h * 0.50, w * 0.14); ctx.fill();
+  ctx.fillStyle = d.trim;
+  ctx.fillRect(-w * 0.42, -h * 0.50, w * 0.84, h * 0.055);
+  ctx.fillStyle = "#5d5169";
+  roundRect(ctx, -w * 0.60, -h * 0.82, w * 0.30, h * 0.20, w * 0.10); ctx.fill();
+  roundRect(ctx, w * 0.30, -h * 0.82, w * 0.30, h * 0.20, w * 0.10); ctx.fill();
+
+  // Helm: a dark dome under a gold brow band, with a lit visor slit. No face.
+  const hy = -h * 0.88, hr = w * 0.25;
+  ctx.fillStyle = "#312a3b";
+  ctx.beginPath(); ctx.arc(0, hy, hr, Math.PI, 0); ctx.fill();
+  ctx.fillRect(-hr, hy, hr * 2, hr * 0.85);
+  ctx.fillStyle = d.trim;
+  ctx.fillRect(-hr, hy - hr * 0.12, hr * 2, hr * 0.24);
+  ctx.fillStyle = "#ffd979";
+  ctx.fillRect(-hr * 0.66, hy + hr * 0.34, hr * 1.32, hr * 0.24);
+
+  // The maul, wound back as the swing charges. Handle and head share one
+  // transform so the head always sits on the end of the shaft.
+  ctx.save();
+  ctx.translate(-w * 0.46, -h * 0.66);
+  ctx.rotate(-0.45 - winding * 1.45);
+  const shaft = h * 0.60, hw = w * 0.34, hh = h * 0.20;
+  ctx.strokeStyle = "#5a422e"; ctx.lineWidth = w * 0.11; ctx.lineCap = "round";
+  ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, -shaft); ctx.stroke();
+  ctx.fillStyle = "#6f6478";
+  roundRect(ctx, -hw / 2, -shaft - hh * 0.62, hw, hh, w * 0.05); ctx.fill();
+  ctx.fillStyle = "#8d8199";
+  ctx.fillRect(-hw / 2, -shaft - hh * 0.62, hw, hh * 0.26);
+  ctx.fillStyle = "#4b4353";
+  ctx.fillRect(-hw / 2, -shaft + hh * 0.22, hw, hh * 0.16);
+  ctx.restore();
 }
 
 function drawRam(inv) {
