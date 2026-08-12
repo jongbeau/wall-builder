@@ -219,7 +219,7 @@ const INVADERS = {
   // Spawned on its own timer, never by the weighted roll — hence unlock/weight
   // putting it outside the normal pool. Slow, enormously tough, and its swing
   // carries into the tiles either side, so a static wall cannot just soak it.
-  titan:    { hp: 3000, speed: 0.62, dmg: 200, atkCd: 1.9, bounty: 240, keepDmg: 45, w: 60, h: 88, unlock: 1e9, weight: 0, body: "#4a4054", trim: "#e0b45a", showHealth: true, smash: 0.5, armor: 14 },
+  titan:    { hp: 6000, speed: 0.62, dmg: 320, atkCd: 1.25, bounty: 340, keepDmg: 60, w: 118, h: 172, unlock: 1e9, weight: 0, body: "#4a4054", trim: "#e0b45a", showHealth: true, smash: 0.75, armor: 18 },
   warlord:  { hp: 700, speed: 0.85, dmg: 45,  atkCd: 1.00, bounty: 60, keepDmg: 25, w: 34, h: 58, unlock: 400, weight: 0.14, body: "#57407a", trim: "#d4b0ff", auraR: 2.2, auraBuff: 0.28 },
 };
 
@@ -1483,7 +1483,11 @@ function hurtInvader(inv, amount) {
 
 const speedOf = (inv) => inv.def.speed * (1 + inv.buff);
 const damageOf = (inv) => inv.def.dmg * (1 + inv.buff) * (1 + Game.t / CONFIG.combat.dmgRampPer);
-const slotCost = (inv) => inv.type === "sapper" ? 0 : 1;
+// Attackers per tile are capped so a horde cannot delete a wall instantly, but
+// two units genuinely do not hold a titan back — it was queueing behind grunts
+// and landing only ~14 swings a run. Costing no frontage means it is never
+// blocked, and never blocks anyone else either.
+const slotCost = (inv) => (inv.type === "sapper" || inv.type === "titan") ? 0 : 1;
 
 let frontage = new Map();
 const slotsUsed = (k) => frontage.get(k) || 0;
@@ -1665,7 +1669,7 @@ function stepAttack(inv, dt) {
           if (slotHeight(nx, ny, sl)) damageBrick(nx, ny, 0, damageOf(inv) * inv.def.smash, inv, sl);
         }
       }
-      Game.shake = Math.min(20, Game.shake + 9);
+      Game.shake = Math.min(26, Game.shake + 13);
     }
   }
 }
